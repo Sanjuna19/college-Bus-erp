@@ -1,0 +1,2220 @@
+from flask import Flask, Response, render_template, request, jsonify, redirect, url_for, session
+import pymysql
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+import io
+import os
+import socket
+pymysql.install_as_MySQLdb()
+import math
+import textwrap
+
+app = Flask(__name__)
+app.secret_key = 'your_secret_key_here'  # Required for session management
+
+# MySQL Configuration
+db_config = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '',
+    'database': 'college_bus_db',
+    'cursorclass': pymysql.cursors.DictCursor # This lets us access columns by name
+}
+
+_schema_checked = False
+SMART_ALERT_RADIUS_METERS = 500
+SMART_ALERT_TTL_MINUTES = 10
+
+
+def ensure_runtime_schema(conn):
+    global _schema_checked
+    if _schema_checked:
+        return
+
+    required_user_columns = {
+        'full_name': "ALTER TABLE users ADD COLUMN full_name VARCHAR(150) NULL",
+        'roll_number': "ALTER TABLE users ADD COLUMN roll_number VARCHAR(50) NULL",
+        'student_stop': "ALTER TABLE users ADD COLUMN student_stop VARCHAR(150) NULL",
+        'department': "ALTER TABLE users ADD COLUMN department VARCHAR(120) NULL",
+        'contact_number': "ALTER TABLE users ADD COLUMN contact_number VARCHAR(30) NULL",
+        'is_blocked': "ALTER TABLE users ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0",
+        'transport_fee': "ALTER TABLE users ADD COLUMN transport_fee DECIMAL(10, 2) NOT NULL DEFAULT 0.00",
+    }
+    required_driver_columns = {
+        'monthly_salary': "ALTER TABLE drivers ADD COLUMN monthly_salary DECIMAL(10, 2) NOT NULL DEFAULT 0.00",
+    }
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS smart_stop_alerts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                student_id VARCHAR(100) NOT NULL,
+                route_id INT NOT NULL,
+                stop_id INT NOT NULL,
+                bus_id INT NULL,
+                driver_id INT NULL,
+                student_lat DECIMAL(10, 8) NOT NULL,
+                student_lng DECIMAL(11, 8) NOT NULL,
+                distance_m DECIMAL(8, 2) NOT NULL,
+                status ENUM('active', 'acknowledged', 'expired') NOT NULL DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME NOT NULL,
+                acknowledged_at DATETIME NULL,
+                KEY idx_smart_stop_alerts_route_status (route_id, status, expires_at),
+                KEY idx_smart_stop_alerts_driver_status (driver_id, status, expires_at),
+                KEY idx_smart_stop_alerts_bus_status (bus_id, status, expires_at),
+                KEY idx_smart_stop_alerts_student_stop (student_id, stop_id, status, expires_at),
+                CONSTRAINT fk_smart_stop_alerts_route
+                    FOREIGN KEY (route_id) REFERENCES routes(id)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE,
+                CONSTRAINT fk_smart_stop_alerts_stop
+                    FOREIGN KEY (stop_id) REFERENCES bus_stops(id)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE,
+                CONSTRAINT fk_smart_stop_alerts_bus
+                    FOREIGN KEY (bus_id) REFERENCES buses(id)
+                    ON DELETE SET NULL
+                    ON UPDATE CASCADE,
+                CONSTRAINT fk_smart_stop_alerts_driver
+                    FOREIGN KEY (driver_id) REFERENCES drivers(id)
+                    ON DELETE SET NULL
+                    ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS student_fee_payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                student_id VARCHAR(100) NOT NULL,
+                amount_paid DECIMAL(10, 2) NOT NULL,
+                payment_date DATE NOT NULL,
+                remarks VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_student_fee_payments_student_date (student_id, payment_date)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS staff_salary_payments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                driver_id INT NOT NULL,
+                salary_month DATE NOT NULL,
+                amount_paid DECIMAL(10, 2) NOT NULL,
+                paid_date DATE NOT NULL,
+                remarks VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_staff_salary_payments_driver_month (driver_id, salary_month),
+                CONSTRAINT fk_staff_salary_payments_driver
+                    FOREIGN KEY (driver_id) REFERENCES drivers(id)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        def fetch_existing_columns(table_name):
+            cur.execute(
+                """
+                SELECT COLUMN_NAME
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                """,
+                (db_config['database'], table_name)
+            )
+            return {row['COLUMN_NAME'] for row in cur.fetchall()}
+
+        existing_user_columns = fetch_existing_columns('users')
+        existing_driver_columns = fetch_existing_columns('drivers')
+        schema_updated = False
+        for column_name, alter_statement in required_user_columns.items():
+            if column_name not in existing_user_columns:
+                cur.execute(alter_statement)
+                schema_updated = True
+        for column_name, alter_statement in required_driver_columns.items():
+            if column_name not in existing_driver_columns:
+                cur.execute(alter_statement)
+                schema_updated = True
+
+        if schema_updated:
+            conn.commit()
+    finally:
+        cur.close()
+
+    _schema_checked = True
+
+# Helper function to get a connection
+def get_db_connection():
+    conn = pymysql.connect(**db_config)
+    ensure_runtime_schema(conn)
+    return conn
+
+
+def fetch_student_profile(cur, student_id):
+    try:
+        cur.execute(
+            """
+            SELECT
+                COALESCE(NULLIF(full_name, ''), username) AS name,
+                roll_number,
+                student_stop
+            FROM users
+            WHERE username = %s
+            """,
+            (student_id,)
+        )
+        student_profile = cur.fetchone() or {}
+    except pymysql.err.OperationalError as exc:
+        if exc.args and exc.args[0] == 1054:
+            cur.execute("SELECT username AS name FROM users WHERE username = %s", (student_id,))
+            student_profile = cur.fetchone() or {}
+        else:
+            raise
+
+    student_profile.setdefault('name', student_id)
+    student_profile.setdefault('roll_number', None)
+    student_profile.setdefault('student_stop', None)
+    return student_profile
+
+
+def make_json_safe(value):
+    if isinstance(value, timedelta):
+        total_seconds = int(value.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    if isinstance(value, datetime):
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, list):
+        return [make_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [make_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: make_json_safe(item) for key, item in value.items()}
+    return value
+
+
+def format_time_display(value):
+    if value is None:
+        return '--'
+
+    if isinstance(value, timedelta):
+        total_seconds = int(value.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        period = 'AM' if hours < 12 else 'PM'
+        hour_12 = hours % 12 or 12
+        return f"{hour_12}:{minutes:02d} {period}"
+
+    if hasattr(value, 'strftime'):
+        return value.strftime('%I:%M %p').lstrip('0')
+
+    return str(value)
+
+
+def to_decimal(value):
+    if isinstance(value, Decimal):
+        return value
+    if value in (None, ''):
+        return Decimal('0.00')
+    return Decimal(str(value))
+
+
+def format_datetime_display(value):
+    if not value:
+        return '--'
+    if hasattr(value, 'strftime'):
+        return value.strftime('%d %b %Y %I:%M %p')
+    return str(value)
+
+
+def format_date_display(value):
+    if not value:
+        return '--'
+    if hasattr(value, 'strftime'):
+        return value.strftime('%d %b %Y')
+    return str(value)
+
+
+def parse_date_value(value, default_value):
+    if not value:
+        return default_value
+    for date_format in ('%Y-%m-%d', '%Y-%m'):
+        try:
+            parsed_value = datetime.strptime(value, date_format).date()
+            if date_format == '%Y-%m':
+                return date(parsed_value.year, parsed_value.month, 1)
+            return parsed_value
+        except (TypeError, ValueError):
+            continue
+    return default_value
+
+
+def normalize_month_start(value):
+    if isinstance(value, datetime):
+        value = value.date()
+    return date(value.year, value.month, 1)
+
+
+def iter_month_starts(start_date, end_date):
+    current = normalize_month_start(start_date)
+    last = normalize_month_start(end_date)
+    months = []
+    while current <= last:
+        months.append(current)
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+    return months
+
+
+def get_student_block_message():
+    return "Your transport login is blocked. Please contact transport admin."
+
+
+def is_student_blocked(cur, student_id):
+    cur.execute(
+        "SELECT COALESCE(is_blocked, 0) AS is_blocked FROM users WHERE username = %s AND role = 'student'",
+        (student_id,)
+    )
+    row = cur.fetchone()
+    return bool(row and row.get('is_blocked'))
+
+
+def ensure_active_student_access(api=False):
+    if not session.get('logged_in') or session.get('role') != 'student':
+        if api:
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+        return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        if is_student_blocked(cur, session.get('username')):
+            session.clear()
+            message = get_student_block_message()
+            if api:
+                return jsonify({'status': 'error', 'message': message}), 403
+            return redirect(url_for('login', blocked='1'))
+    finally:
+        cur.close()
+        conn.close()
+
+    return None
+
+
+def safe_admin_return_url(default_tab='overview'):
+    return_url = request.form.get('return_url') or request.args.get('return_url') or ''
+    if return_url.startswith('/'):
+        return return_url
+    return url_for('admin_dashboard', tab=default_tab)
+
+
+def fetch_student_metrics(cur):
+    cur.execute(
+        """
+        SELECT
+            COUNT(*) AS total_students,
+            COALESCE(SUM(CASE WHEN username IS NOT NULL AND username <> '' THEN 1 ELSE 0 END), 0) AS ids_created,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 0 THEN 1 ELSE 0 END), 0) AS active_ids,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 1 THEN 1 ELSE 0 END), 0) AS blocked_ids,
+            COUNT(DISTINCT COALESCE(NULLIF(department, ''), 'Unassigned')) AS departments_count
+        FROM users
+        WHERE role = 'student'
+        """
+    )
+    return cur.fetchone() or {
+        'total_students': 0,
+        'ids_created': 0,
+        'active_ids': 0,
+        'blocked_ids': 0,
+        'departments_count': 0
+    }
+
+
+def fetch_department_summaries(cur):
+    cur.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(department, ''), 'Unassigned') AS department,
+            COUNT(*) AS total_students,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 1 THEN 1 ELSE 0 END), 0) AS blocked_students,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 0 THEN 1 ELSE 0 END), 0) AS active_students
+        FROM users
+        WHERE role = 'student'
+        GROUP BY department
+        ORDER BY department ASC
+        """
+    )
+    return cur.fetchall()
+
+
+def fetch_student_directory(cur, department_filter='', search_term=''):
+    filters = ["u.role = 'student'"]
+    params = []
+    if department_filter:
+        filters.append("COALESCE(NULLIF(u.department, ''), 'Unassigned') = %s")
+        params.append(department_filter)
+    if search_term:
+        like_value = f"%{search_term}%"
+        filters.append(
+            "(u.username LIKE %s OR COALESCE(u.full_name, '') LIKE %s OR COALESCE(u.roll_number, '') LIKE %s)"
+        )
+        params.extend([like_value, like_value, like_value])
+
+    where_clause = " AND ".join(filters)
+    cur.execute(
+        f"""
+        SELECT
+            u.username,
+            COALESCE(NULLIF(u.full_name, ''), u.username) AS full_name,
+            COALESCE(NULLIF(u.roll_number, ''), '--') AS roll_number,
+            COALESCE(NULLIF(u.department, ''), 'Unassigned') AS department,
+            COALESCE(NULLIF(u.contact_number, ''), '--') AS contact_number,
+            COALESCE(NULLIF(u.student_stop, ''), '--') AS student_stop,
+            COALESCE(u.transport_fee, 0.00) AS transport_fee,
+            COALESCE(u.is_blocked, 0) AS is_blocked,
+            COALESCE(att.present_days_total, 0) AS present_days_total,
+            att.last_present_at,
+            COALESCE(pay.total_paid, 0.00) AS paid_fee,
+            pay.last_payment_date
+        FROM users u
+        LEFT JOIN (
+            SELECT
+                student_id,
+                COUNT(DISTINCT DATE(timestamp)) AS present_days_total,
+                MAX(timestamp) AS last_present_at
+            FROM usage_logs
+            WHERE action_type = 'boarding'
+            GROUP BY student_id
+        ) att ON att.student_id = u.username
+        LEFT JOIN (
+            SELECT
+                student_id,
+                SUM(amount_paid) AS total_paid,
+                MAX(payment_date) AS last_payment_date
+            FROM student_fee_payments
+            GROUP BY student_id
+        ) pay ON pay.student_id = u.username
+        WHERE {where_clause}
+        ORDER BY department ASC, full_name ASC
+        """,
+        params
+    )
+    rows = cur.fetchall()
+
+    for row in rows:
+        row['transport_fee'] = to_decimal(row.get('transport_fee'))
+        row['paid_fee'] = to_decimal(row.get('paid_fee'))
+        balance_fee = row['transport_fee'] - row['paid_fee']
+        row['balance_fee'] = balance_fee if balance_fee > 0 else Decimal('0.00')
+        row['is_blocked'] = bool(row.get('is_blocked'))
+        row['present_days_total'] = int(row.get('present_days_total') or 0)
+        row['last_present_display'] = format_datetime_display(row.get('last_present_at'))
+        row['last_payment_display'] = format_date_display(row.get('last_payment_date'))
+
+    return rows
+
+
+def build_student_fee_summary(student_rows):
+    summary = {
+        'students_count': len(student_rows),
+        'total_fee': Decimal('0.00'),
+        'paid_fee': Decimal('0.00'),
+        'balance_fee': Decimal('0.00'),
+    }
+    for row in student_rows:
+        summary['total_fee'] += to_decimal(row.get('transport_fee'))
+        summary['paid_fee'] += to_decimal(row.get('paid_fee'))
+        summary['balance_fee'] += to_decimal(row.get('balance_fee'))
+    return summary
+
+
+def fetch_driver_salary_overview(cur):
+    cur.execute(
+        """
+        SELECT
+            d.id,
+            d.name,
+            COALESCE(NULLIF(d.contact, ''), '--') AS contact,
+            COALESCE(d.monthly_salary, 0.00) AS monthly_salary,
+            COALESCE(b.bus_number, 'Unassigned') AS bus_number,
+            COALESCE(pay.total_paid, 0.00) AS total_paid_salary,
+            pay.last_paid_date
+        FROM drivers d
+        LEFT JOIN buses b ON b.id = d.bus_id
+        LEFT JOIN (
+            SELECT
+                driver_id,
+                SUM(amount_paid) AS total_paid,
+                MAX(paid_date) AS last_paid_date
+            FROM staff_salary_payments
+            GROUP BY driver_id
+        ) pay ON pay.driver_id = d.id
+        ORDER BY d.name ASC
+        """
+    )
+    rows = cur.fetchall()
+    for row in rows:
+        row['monthly_salary'] = to_decimal(row.get('monthly_salary'))
+        row['total_paid_salary'] = to_decimal(row.get('total_paid_salary'))
+        row['last_paid_display'] = format_date_display(row.get('last_paid_date'))
+    return rows
+
+
+def build_student_report_dataset(cur, from_date, to_date, department_filter=''):
+    filters = ["u.role = 'student'"]
+    params = [from_date, to_date]
+    if department_filter:
+        filters.append("COALESCE(NULLIF(u.department, ''), 'Unassigned') = %s")
+        params.append(department_filter)
+
+    where_clause = " AND ".join(filters)
+    cur.execute(
+        f"""
+        SELECT
+            u.username,
+            COALESCE(NULLIF(u.full_name, ''), u.username) AS full_name,
+            COALESCE(NULLIF(u.roll_number, ''), '--') AS roll_number,
+            COALESCE(NULLIF(u.department, ''), 'Unassigned') AS department,
+            COALESCE(range_att.present_days, 0) AS present_days,
+            range_att.last_present_at,
+            COALESCE(u.transport_fee, 0.00) AS transport_fee,
+            COALESCE(pay.total_paid, 0.00) AS paid_fee
+        FROM users u
+        LEFT JOIN (
+            SELECT
+                student_id,
+                COUNT(DISTINCT DATE(timestamp)) AS present_days,
+                MAX(timestamp) AS last_present_at
+            FROM usage_logs
+            WHERE action_type = 'boarding' AND DATE(timestamp) BETWEEN %s AND %s
+            GROUP BY student_id
+        ) range_att ON range_att.student_id = u.username
+        LEFT JOIN (
+            SELECT
+                student_id,
+                SUM(amount_paid) AS total_paid
+            FROM student_fee_payments
+            GROUP BY student_id
+        ) pay ON pay.student_id = u.username
+        WHERE {where_clause}
+        ORDER BY department ASC, full_name ASC
+        """,
+        params
+    )
+    rows = cur.fetchall()
+
+    summary = {
+        'records': len(rows),
+        'present_days': 0,
+        'total_fee': Decimal('0.00'),
+        'paid_fee': Decimal('0.00'),
+        'balance_fee': Decimal('0.00'),
+    }
+    export_rows = []
+
+    for row in rows:
+        row['transport_fee'] = to_decimal(row.get('transport_fee'))
+        row['paid_fee'] = to_decimal(row.get('paid_fee'))
+        row['present_days'] = int(row.get('present_days') or 0)
+        balance_fee = row['transport_fee'] - row['paid_fee']
+        row['balance_fee'] = balance_fee if balance_fee > 0 else Decimal('0.00')
+        row['last_present_display'] = format_datetime_display(row.get('last_present_at'))
+
+        summary['present_days'] += row['present_days']
+        summary['total_fee'] += row['transport_fee']
+        summary['paid_fee'] += row['paid_fee']
+        summary['balance_fee'] += row['balance_fee']
+
+        export_rows.append([
+            row['username'],
+            row['full_name'],
+            row['roll_number'],
+            row['department'],
+            row['present_days'],
+            row['last_present_display'],
+            f"{row['transport_fee']:.2f}",
+            f"{row['paid_fee']:.2f}",
+            f"{row['balance_fee']:.2f}",
+        ])
+
+    return {
+        'title': 'Student Attendance and Fee Report',
+        'headers': [
+            'Student ID', 'Student Name', 'Roll Number', 'Department',
+            'Present Days', 'Last Present', 'Total Fee', 'Paid Fee', 'Balance Fee'
+        ],
+        'rows': rows,
+        'export_rows': export_rows,
+        'summary': summary,
+    }
+
+
+def build_staff_report_dataset(cur, from_date, to_date):
+    range_months = iter_month_starts(from_date, to_date)
+    month_count = len(range_months)
+    first_month = range_months[0] if range_months else normalize_month_start(from_date)
+    last_month = range_months[-1] if range_months else normalize_month_start(to_date)
+
+    cur.execute(
+        """
+        SELECT
+            d.id,
+            d.name,
+            COALESCE(NULLIF(d.contact, ''), '--') AS contact,
+            COALESCE(d.monthly_salary, 0.00) AS monthly_salary,
+            COALESCE(b.bus_number, 'Unassigned') AS bus_number,
+            COALESCE(att.present_days, 0) AS present_days
+        FROM drivers d
+        LEFT JOIN buses b ON b.id = d.bus_id
+        LEFT JOIN (
+            SELECT
+                driver_id,
+                COUNT(DISTINCT assignment_date) AS present_days
+            FROM driver_route_assignments
+            WHERE assignment_date BETWEEN %s AND %s
+            GROUP BY driver_id
+        ) att ON att.driver_id = d.id
+        ORDER BY d.name ASC
+        """,
+        (from_date, to_date)
+    )
+    rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT
+            driver_id,
+            salary_month,
+            SUM(amount_paid) AS amount_paid
+        FROM staff_salary_payments
+        WHERE salary_month BETWEEN %s AND %s
+        GROUP BY driver_id, salary_month
+        """,
+        (first_month, last_month)
+    )
+    paid_rows = cur.fetchall()
+    paid_index = {}
+    for payment in paid_rows:
+        driver_payments = paid_index.setdefault(payment['driver_id'], {})
+        driver_payments[normalize_month_start(payment['salary_month'])] = to_decimal(payment.get('amount_paid'))
+
+    summary = {
+        'records': len(rows),
+        'present_days': 0,
+        'salary_total': Decimal('0.00'),
+        'salary_paid': Decimal('0.00'),
+        'salary_balance': Decimal('0.00'),
+    }
+    export_rows = []
+
+    for row in rows:
+        driver_id = row['id']
+        monthly_salary = to_decimal(row.get('monthly_salary'))
+        paid_by_month = paid_index.get(driver_id, {})
+        salary_total = monthly_salary * Decimal(month_count)
+        salary_paid = sum(paid_by_month.values(), Decimal('0.00'))
+        salary_balance = salary_total - salary_paid
+        due_months = []
+
+        for salary_month in range_months:
+            paid_amount = paid_by_month.get(salary_month, Decimal('0.00'))
+            month_balance = monthly_salary - paid_amount
+            if month_balance > 0:
+                due_months.append(f"{month_balance:.2f} - {salary_month.strftime('%b-%Y')}")
+
+        row['monthly_salary'] = monthly_salary
+        row['present_days'] = int(row.get('present_days') or 0)
+        row['salary_total'] = salary_total if salary_total > 0 else Decimal('0.00')
+        row['salary_paid'] = salary_paid if salary_paid > 0 else Decimal('0.00')
+        row['salary_balance'] = salary_balance if salary_balance > 0 else Decimal('0.00')
+        row['due_months'] = due_months
+        row['due_months_display'] = ', '.join(due_months) if due_months else 'Paid'
+
+        summary['present_days'] += row['present_days']
+        summary['salary_total'] += row['salary_total']
+        summary['salary_paid'] += row['salary_paid']
+        summary['salary_balance'] += row['salary_balance']
+
+        export_rows.append([
+            row['name'],
+            row['contact'],
+            row['bus_number'],
+            row['present_days'],
+            f"{row['monthly_salary']:.2f}",
+            f"{row['salary_total']:.2f}",
+            f"{row['salary_paid']:.2f}",
+            f"{row['salary_balance']:.2f}",
+            row['due_months_display'],
+        ])
+
+    return {
+        'title': 'Staff Attendance and Salary Report',
+        'headers': [
+            'Driver Name', 'Contact', 'Bus Number', 'Present Days',
+            'Monthly Salary', 'Salary For Range', 'Paid Amount', 'Balance Amount', 'Due Months'
+        ],
+        'rows': rows,
+        'export_rows': export_rows,
+        'summary': summary,
+    }
+
+
+def build_report_dataset(cur, report_type, from_date, to_date, department_filter=''):
+    if report_type == 'staff':
+        return build_staff_report_dataset(cur, from_date, to_date)
+    return build_student_report_dataset(cur, from_date, to_date, department_filter=department_filter)
+
+
+def build_excel_report_response(dataset, filename):
+    cells = []
+    cells.append('<html><head><meta charset="utf-8"></head><body>')
+    cells.append(f"<h2>{dataset['title']}</h2>")
+    cells.append('<table border="1" cellspacing="0" cellpadding="6">')
+    cells.append('<tr>' + ''.join(f'<th>{header}</th>' for header in dataset['headers']) + '</tr>')
+    for row in dataset['export_rows']:
+        cells.append('<tr>' + ''.join(f'<td>{value}</td>' for value in row) + '</tr>')
+    cells.append('</table></body></html>')
+
+    return Response(
+        ''.join(cells),
+        mimetype='application/vnd.ms-excel',
+        headers={'Content-Disposition': f'attachment; filename="{filename}.xls"'}
+    )
+
+
+def build_pdf_report_response(dataset, filename, from_date, to_date):
+    def escape_pdf_text(value):
+        text = str(value).replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+        return text.encode('latin-1', 'replace').decode('latin-1')
+
+    lines = [
+        dataset['title'],
+        f"Date Range: {from_date.strftime('%d %b %Y')} to {to_date.strftime('%d %b %Y')}",
+        ''
+    ]
+    header_line = ' | '.join(dataset['headers'])
+    separator_line = '-' * min(max(len(header_line), 40), 120)
+    lines.append(header_line)
+    lines.append(separator_line)
+
+    for row in dataset['export_rows']:
+        line = ' | '.join(str(value) for value in row)
+        lines.extend(textwrap.wrap(line, width=110) or [''])
+
+    page_lines = []
+    chunk_size = 48
+    for index in range(0, len(lines), chunk_size):
+        page_lines.append(lines[index:index + chunk_size])
+    if not page_lines:
+        page_lines = [['No data available']]
+
+    objects = []
+    page_refs = []
+    font_object_id = 3
+    next_object_id = 4
+
+    for page in page_lines:
+        page_id = next_object_id
+        content_id = next_object_id + 1
+        next_object_id += 2
+        page_refs.append(page_id)
+
+        stream_lines = ["BT", "/F1 9 Tf", "50 800 Td", "12 TL"]
+        first_line = True
+        for line in page:
+            safe_line = escape_pdf_text(line)
+            if first_line:
+                stream_lines.append(f"({safe_line}) Tj")
+                first_line = False
+            else:
+                stream_lines.append("T*")
+                stream_lines.append(f"({safe_line}) Tj")
+        stream_lines.append("ET")
+        stream = '\n'.join(stream_lines)
+        stream_bytes = stream.encode('latin-1', 'replace')
+
+        objects.append(
+            f"{page_id} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] "
+            f"/Resources << /Font << /F1 {font_object_id} 0 R >> >> /Contents {content_id} 0 R >> endobj"
+        )
+        objects.append(
+            f"{content_id} 0 obj << /Length {len(stream_bytes)} >> stream\n{stream}\nendstream\nendobj"
+        )
+
+    catalog = "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj"
+    pages = f"2 0 obj << /Type /Pages /Kids [{' '.join(f'{ref} 0 R' for ref in page_refs)}] /Count {len(page_refs)} >> endobj"
+    font = "3 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj"
+
+    ordered_objects = [catalog, pages, font] + objects
+    pdf_buffer = io.BytesIO()
+    pdf_buffer.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+
+    for obj in ordered_objects:
+        offsets.append(pdf_buffer.tell())
+        pdf_buffer.write(obj.encode('latin-1', 'replace'))
+        pdf_buffer.write(b"\n")
+
+    xref_start = pdf_buffer.tell()
+    pdf_buffer.write(f"xref\n0 {len(ordered_objects) + 1}\n".encode('latin-1'))
+    pdf_buffer.write(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf_buffer.write(f"{offset:010d} 00000 n \n".encode('latin-1'))
+    pdf_buffer.write(
+        f"trailer << /Size {len(ordered_objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode('latin-1')
+    )
+
+    return Response(
+        pdf_buffer.getvalue(),
+        mimetype='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename="{filename}.pdf"'}
+    )
+
+
+def build_route_stops_index(cur, route_ids):
+    route_ids = [route_id for route_id in dict.fromkeys(route_ids) if route_id]
+    if not route_ids:
+        return {}
+
+    placeholders = ','.join(['%s'] * len(route_ids))
+    cur.execute(
+        f"""
+        SELECT id, route_id, stop_name, lat, lng
+        FROM bus_stops
+        WHERE route_id IN ({placeholders})
+        ORDER BY route_id, id ASC
+        """,
+        route_ids
+    )
+
+    stops_by_route = {}
+    for stop in cur.fetchall():
+        safe_stop = {
+            'id': stop['id'],
+            'route_id': stop['route_id'],
+            'stop_name': stop['stop_name'],
+            'lat': float(stop['lat']),
+            'lng': float(stop['lng']),
+        }
+        stops_by_route.setdefault(stop['route_id'], []).append(safe_stop)
+
+    return stops_by_route
+
+
+def fetch_route_stops(cur, route_id):
+    return build_route_stops_index(cur, [route_id]).get(route_id, [])
+
+
+def get_driver_current_route_id(cur, driver_id, bus_id=None):
+    today = datetime.now().strftime('%Y-%m-%d')
+    cur.execute(
+        """
+        SELECT route_id
+        FROM driver_route_assignments
+        WHERE driver_id = %s AND assignment_date = %s
+        """,
+        (driver_id, today)
+    )
+    assignment = cur.fetchone()
+    if assignment and assignment.get('route_id'):
+        return assignment['route_id']
+
+    if bus_id:
+        cur.execute("SELECT route_id FROM buses WHERE id = %s", (bus_id,))
+        bus_row = cur.fetchone()
+        if bus_row and bus_row.get('route_id'):
+            return bus_row['route_id']
+
+    return None
+
+
+def find_target_stop_for_alert(route_stops, student_lat, student_lng, preferred_stop_name=None, preferred_stop_id=None):
+    if not route_stops:
+        return None, None
+
+    preferred_stop_name_normalized = (preferred_stop_name or '').strip().lower()
+    preferred_stop = None
+    nearest_stop = None
+    nearest_distance = None
+
+    for stop in route_stops:
+        distance_m = calculate_distance(student_lat, student_lng, stop['lat'], stop['lng'])
+        stop_with_distance = {
+            **stop,
+            'distance_m': round(distance_m, 2)
+        }
+
+        if nearest_distance is None or distance_m < nearest_distance:
+            nearest_stop = stop_with_distance
+            nearest_distance = distance_m
+
+        if preferred_stop_id and stop['id'] == preferred_stop_id:
+            preferred_stop = stop_with_distance
+        elif preferred_stop_name_normalized and stop['stop_name'].strip().lower() == preferred_stop_name_normalized:
+            preferred_stop = stop_with_distance
+
+    if preferred_stop and preferred_stop['distance_m'] <= SMART_ALERT_RADIUS_METERS:
+        return preferred_stop, preferred_stop['distance_m']
+
+    if nearest_stop and nearest_stop['distance_m'] <= SMART_ALERT_RADIUS_METERS:
+        return nearest_stop, nearest_stop['distance_m']
+
+    return nearest_stop, nearest_distance
+
+
+def find_next_bus_for_stop(cur, route_id, stop_id, route_stops=None):
+    route_stops = route_stops or fetch_route_stops(cur, route_id)
+    if not route_stops:
+        return None
+
+    stop_index = {stop['id']: index for index, stop in enumerate(route_stops)}
+    target_stop = next((stop for stop in route_stops if stop['id'] == stop_id), None)
+    if not target_stop:
+        return None
+
+    cur.execute(
+        """
+        SELECT b.id, b.bus_number, b.current_lat, b.current_lng, b.status, b.speed, b.route_id,
+               b.updated_at, d.id AS driver_id, d.name AS driver_name, d.contact AS driver_contact,
+               r.route_name
+        FROM buses b
+        LEFT JOIN drivers d ON d.bus_id = b.id
+        LEFT JOIN routes r ON r.id = b.route_id
+        WHERE b.route_id = %s AND b.status = 'active'
+        """,
+        (route_id,)
+    )
+    active_buses = enrich_live_bus_rows(cur, cur.fetchall())
+
+    best_bus = None
+    best_score = None
+    target_index = stop_index.get(stop_id, 10 ** 6)
+
+    for bus in active_buses:
+        nearest_index = stop_index.get(bus.get('nearest_stop_id'))
+        ahead_of_stop = 0 if nearest_index is None or nearest_index <= target_index else 1
+        stop_gap = target_index if nearest_index is None else abs(target_index - nearest_index)
+        stale_penalty = 1 if bus.get('is_stale') else 0
+
+        if bus.get('current_lat') is not None and bus.get('current_lng') is not None:
+            distance_to_target = calculate_distance(
+                bus['current_lat'],
+                bus['current_lng'],
+                target_stop['lat'],
+                target_stop['lng']
+            )
+        else:
+            distance_to_target = 10 ** 9
+
+        last_update_seconds = bus.get('last_update_seconds')
+        freshness_score = last_update_seconds if last_update_seconds is not None else 10 ** 6
+        score = (ahead_of_stop, stale_penalty, stop_gap, distance_to_target, freshness_score)
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_bus = bus
+
+    if best_bus:
+        return best_bus
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    cur.execute(
+        """
+        SELECT d.id AS driver_id, d.name AS driver_name, d.contact AS driver_contact,
+               b.id AS id, b.bus_number, b.route_id, r.route_name
+        FROM driver_route_assignments dra
+        JOIN drivers d ON d.id = dra.driver_id
+        LEFT JOIN buses b ON b.id = d.bus_id
+        LEFT JOIN routes r ON r.id = dra.route_id
+        WHERE dra.route_id = %s AND dra.assignment_date = %s
+        ORDER BY d.id ASC
+        LIMIT 1
+        """,
+        (route_id, today)
+    )
+    fallback_row = cur.fetchone()
+    if not fallback_row:
+        return None
+
+    return {
+        'id': fallback_row.get('id'),
+        'bus_number': fallback_row.get('bus_number'),
+        'route_id': fallback_row.get('route_id'),
+        'route_name': fallback_row.get('route_name'),
+        'driver_id': fallback_row.get('driver_id'),
+        'driver_name': fallback_row.get('driver_name'),
+        'driver_contact': fallback_row.get('driver_contact'),
+        'current_lat': None,
+        'current_lng': None,
+        'nearest_stop_id': None,
+        'nearest_stop_name': None,
+        'is_stale': True,
+        'last_update_seconds': None,
+    }
+
+
+def cleanup_expired_smart_alerts(cur):
+    cur.execute(
+        """
+        UPDATE smart_stop_alerts
+        SET status = 'expired'
+        WHERE status = 'active' AND expires_at < NOW()
+        """
+    )
+
+
+def fetch_driver_smart_alerts(cur, route_id, bus_id=None, driver_id=None, limit=10):
+    if not route_id:
+        return []
+
+    params = [route_id]
+    filters = [
+        "ssa.route_id = %s",
+        "ssa.status = 'active'",
+        "ssa.expires_at >= NOW()",
+    ]
+
+    if bus_id:
+        filters.append("(ssa.bus_id IS NULL OR ssa.bus_id = %s)")
+        params.append(bus_id)
+
+    if driver_id:
+        filters.append("(ssa.driver_id IS NULL OR ssa.driver_id = %s)")
+        params.append(driver_id)
+
+    params.append(limit)
+    cur.execute(
+        f"""
+        SELECT
+            ssa.id,
+            ssa.student_id,
+            COALESCE(NULLIF(u.full_name, ''), ssa.student_id) AS student_name,
+            ssa.distance_m,
+            ssa.created_at,
+            ssa.expires_at,
+            bs.stop_name,
+            b.bus_number,
+            d.name AS target_driver_name
+        FROM smart_stop_alerts ssa
+        JOIN bus_stops bs ON bs.id = ssa.stop_id
+        LEFT JOIN users u ON u.username = ssa.student_id
+        LEFT JOIN buses b ON b.id = ssa.bus_id
+        LEFT JOIN drivers d ON d.id = ssa.driver_id
+        WHERE {' AND '.join(filters)}
+        ORDER BY ssa.created_at DESC
+        LIMIT %s
+        """,
+        params
+    )
+
+    alerts = []
+    now = datetime.now()
+    for row in cur.fetchall():
+        created_at = row.get('created_at')
+        age_seconds = max(0, int((now - created_at).total_seconds())) if isinstance(created_at, datetime) else None
+        alerts.append({
+            'id': row['id'],
+            'student_id': row['student_id'],
+            'student_name': row['student_name'],
+            'stop_name': row['stop_name'],
+            'distance_m': float(row['distance_m']) if row.get('distance_m') is not None else None,
+            'created_at': make_json_safe(created_at),
+            'created_at_display': created_at.strftime('%I:%M %p') if isinstance(created_at, datetime) else 'Just now',
+            'age_seconds': age_seconds,
+            'bus_number': row.get('bus_number'),
+            'target_driver_name': row.get('target_driver_name'),
+        })
+
+    return alerts
+
+
+def enrich_live_bus_rows(cur, buses):
+    stops_by_route = build_route_stops_index(
+        cur,
+        [bus.get('route_id') for bus in buses if bus.get('route_id')]
+    )
+
+    now = datetime.now()
+    enriched_buses = []
+
+    for bus in buses:
+        lat = float(bus['current_lat']) if bus.get('current_lat') is not None else None
+        lng = float(bus['current_lng']) if bus.get('current_lng') is not None else None
+        speed = float(bus['speed']) if bus.get('speed') is not None else 0.0
+        updated_at = bus.get('updated_at')
+        route_stops = stops_by_route.get(bus.get('route_id'), [])
+
+        nearest_stop = None
+        nearest_distance_m = None
+        if lat is not None and lng is not None and route_stops:
+            for stop in route_stops:
+                distance_m = calculate_distance(lat, lng, stop['lat'], stop['lng'])
+                if nearest_distance_m is None or distance_m < nearest_distance_m:
+                    nearest_distance_m = distance_m
+                    nearest_stop = stop
+
+        distance_to_stop_km = round(nearest_distance_m / 1000.0, 2) if nearest_distance_m is not None else None
+        effective_speed = speed if speed > 5 else (25.0 if bus.get('status') == 'active' else 15.0)
+        eta_minutes = None
+        if distance_to_stop_km is not None and effective_speed > 0:
+            eta_minutes = max(1, math.ceil((distance_to_stop_km / effective_speed) * 60))
+
+        last_update_seconds = None
+        if isinstance(updated_at, datetime):
+            last_update_seconds = max(0, int((now - updated_at).total_seconds()))
+
+        has_location = lat is not None and lng is not None
+        is_stale = (not has_location) or last_update_seconds is None or last_update_seconds > 12
+
+        if bus.get('status') == 'maintenance':
+            status_label = 'Maintenance'
+        elif is_stale:
+            status_label = 'Waiting for GPS'
+        else:
+            status_label = 'Live'
+
+        movement_status = 'moving' if speed > 5 else ('idle' if bus.get('status') == 'active' else bus.get('status'))
+
+        enriched_buses.append({
+            'id': bus['id'],
+            'bus_number': bus['bus_number'],
+            'status': bus['status'],
+            'status_label': status_label,
+            'route_id': bus.get('route_id'),
+            'route_name': bus.get('route_name'),
+            'driver_name': bus.get('driver_name'),
+            'driver_contact': bus.get('driver_contact'),
+            'current_lat': lat,
+            'current_lng': lng,
+            'speed': round(speed, 1),
+            'movement_status': movement_status,
+            'updated_at': make_json_safe(updated_at),
+            'updated_at_display': updated_at.strftime('%I:%M:%S %p') if isinstance(updated_at, datetime) else 'No update yet',
+            'last_update_seconds': last_update_seconds,
+            'is_stale': is_stale,
+            'has_location': has_location,
+            'nearest_stop_id': nearest_stop['id'] if nearest_stop else None,
+            'nearest_stop_name': nearest_stop['stop_name'] if nearest_stop else None,
+            'distance_to_stop_km': distance_to_stop_km,
+            'eta_minutes': eta_minutes,
+            'route_stops_count': len(route_stops),
+        })
+
+    return enriched_buses
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    # Haversine formula to find distance in meters
+    R = 6371000 
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+
+def get_local_ip():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+@app.before_request
+def protect_admin_routes():
+    if request.path.startswith('/admin/'):
+        if not session.get('logged_in') or session.get('role') != 'admin':
+            return redirect(url_for('login'))
+
+@app.route('/')
+def index():
+    return redirect(url_for('login'))
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = get_student_block_message() if request.args.get('blocked') == '1' else None
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Verify credentials (assuming 'users' table exists from setup)
+        cur.execute("SELECT * FROM users WHERE username = %s AND password = %s", (username, password))
+        user = cur.fetchone()
+        
+        if user:
+            if user['role'] == 'student' and user.get('is_blocked'):
+                error = get_student_block_message()
+                cur.close()
+                conn.close()
+                return render_template('login.html', error=error)
+
+            session['logged_in'] = True
+            session['username'] = user['username']
+            session['role'] = user['role']
+            
+            if user['role'] == 'admin':
+                cur.close()
+                conn.close()
+                return redirect(url_for('admin_dashboard'))
+            elif user['role'] == 'driver':
+                # Fetch assigned bus for the driver
+                cur.execute("SELECT id, bus_id FROM drivers WHERE name = %s", (user['username'],))
+                driver_info = cur.fetchone()
+                if driver_info:
+                    session['bus_id'] = driver_info['bus_id']
+                    session['driver_id'] = driver_info['id']
+                cur.close()
+                conn.close()
+                return redirect(url_for('driver_dashboard'))
+            elif user['role'] == 'student':
+                cur.close()
+                conn.close()
+                return redirect(url_for('student_dashboard'))
+        
+        error = 'Invalid credentials'
+        cur.close()
+        conn.close()
+        
+    return render_template('login.html', error=error)
+
+@app.route('/driver/dashboard')
+def driver_dashboard():
+    if not session.get('logged_in') or session.get('role') != 'driver':
+        return redirect(url_for('login'))
+    
+    bus_id = session.get('bus_id')
+    driver_id = session.get('driver_id')
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Fetch Bus Details
+    cur.execute("SELECT * FROM buses WHERE id = %s", (bus_id,))
+    bus = cur.fetchone()
+    
+    stops = []
+    route = None
+    current_route_id = get_driver_current_route_id(cur, driver_id, bus_id)
+
+    if current_route_id:
+        # Update bus route_id in DB so students see the correct route
+        if bus_id and (not bus or bus.get('route_id') != current_route_id):
+            cur.execute("UPDATE buses SET route_id = %s WHERE id = %s", (current_route_id, bus_id))
+            conn.commit()
+            
+        cur.execute("SELECT * FROM bus_stops WHERE route_id = %s ORDER BY id ASC", (current_route_id,))
+        stops = cur.fetchall()
+        
+        cur.execute("SELECT * FROM routes WHERE id = %s", (current_route_id,))
+        route = cur.fetchone()
+
+    # Fetch Alerts
+    cur.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 5")
+    alerts = cur.fetchall()
+    smart_alerts = fetch_driver_smart_alerts(cur, current_route_id, bus_id=bus_id, driver_id=driver_id)
+
+    cur.execute("SELECT COUNT(*) AS count FROM users WHERE role = 'student'")
+    total_students = cur.fetchone()['count']
+
+    cur.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(u.full_name, ''), ul.student_id) AS student_name,
+            ul.timestamp
+        FROM usage_logs ul
+        LEFT JOIN users u ON u.username = ul.student_id
+        WHERE ul.action_type = 'boarding' AND DATE(ul.timestamp) = CURDATE()
+        ORDER BY ul.timestamp DESC
+        LIMIT 6
+        """
+    )
+    student_checkins = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    return render_template(
+        'driver_dashboard.html',
+        bus=bus,
+        bus_for_js=make_json_safe(bus or {}),
+        alerts=alerts,
+        smart_alerts=smart_alerts,
+        stops=stops,
+        stops_for_js=make_json_safe(stops),
+        route=route,
+        route_start_time_display=format_time_display(route.get('start_time') if route else None),
+        total_students=total_students,
+        student_checkins=student_checkins,
+        student_checkins_for_js=make_json_safe(student_checkins)
+    )
+
+@app.route('/student/dashboard')
+def student_dashboard():
+    access_response = ensure_active_student_access(api=False)
+    if access_response is not None:
+        return access_response
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Fetch All Routes for selection
+    cur.execute("SELECT * FROM routes")
+    routes = cur.fetchall()
+    routes_for_js = make_json_safe(routes)
+    
+    # Fetch Alerts
+    cur.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 5")
+    alerts = cur.fetchall()
+
+    # Fetch Favorites
+    student_id = session.get('username')
+    cur.execute("SELECT value FROM student_favorites WHERE student_id = %s AND type = 'route'", (student_id,))
+    favorites = [int(row['value']) for row in cur.fetchall()]
+
+    # Fetch Student Profile
+    student_profile = fetch_student_profile(cur, student_id)
+
+    # Fetch Ride History
+    cur.execute("SELECT * FROM usage_logs WHERE student_id = %s ORDER BY timestamp DESC LIMIT 20", (student_id,))
+    ride_history = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    return render_template(
+        'student_dashboard.html',
+        routes=routes,
+        routes_for_js=routes_for_js,
+        alerts=alerts,
+        favorites=favorites,
+        ride_history=ride_history,
+        student_profile=student_profile,
+        smart_alert_radius=SMART_ALERT_RADIUS_METERS
+    )
+
+@app.route('/api/toggle_favorite', methods=['POST'])
+def toggle_favorite():
+    access_response = ensure_active_student_access(api=True)
+    if access_response is not None:
+        return access_response
+
+    data = request.json
+    student_id = session.get('username')
+    item_type = data.get('type')
+    value = data.get('value')
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Check if exists
+    cur.execute("SELECT id FROM student_favorites WHERE student_id=%s AND type=%s AND value=%s", 
+                (student_id, item_type, value))
+    exists = cur.fetchone()
+    
+    if exists:
+        cur.execute("DELETE FROM student_favorites WHERE id=%s", (exists['id'],))
+        action = 'removed'
+    else:
+        cur.execute("INSERT INTO student_favorites (student_id, type, value) VALUES (%s, %s, %s)", 
+                    (student_id, item_type, value))
+        action = 'added'
+        
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'status': 'success', 'action': action})
+
+@app.route('/api/route_stops/<int:route_id>')
+def get_route_stops(route_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM bus_stops WHERE route_id = %s", (route_id,))
+    stops = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(make_json_safe(stops))
+
+@app.route('/admin/dashboard')
+def admin_dashboard():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    active_tab = request.args.get('tab', 'overview')
+    today = date.today()
+    default_from_date = today.replace(day=1)
+
+    student_department = (request.args.get('student_department') or '').strip()
+    student_search = (request.args.get('student_search') or '').strip()
+    fee_department = (request.args.get('fee_department') or '').strip()
+    fee_search = (request.args.get('fee_search') or '').strip()
+
+    report_type = (request.args.get('report_type') or 'student').strip().lower()
+    if report_type not in {'student', 'staff'}:
+        report_type = 'student'
+    report_from = parse_date_value(request.args.get('from_date'), default_from_date)
+    report_to = parse_date_value(request.args.get('to_date'), today)
+    if report_from > report_to:
+        report_from, report_to = report_to, report_from
+    report_department = (request.args.get('report_department') or '').strip() if report_type == 'student' else ''
+
+    # Metric 1: Total Active Buses
+    cur.execute("SELECT COUNT(*) as count FROM buses WHERE status = 'active'")
+    active_buses = cur.fetchone()['count']
+
+    # Metric 2: Total SOS Alerts Today
+    cur.execute(
+        "SELECT COUNT(*) as count FROM usage_logs WHERE action_type = 'sos' AND DATE(timestamp) = %s",
+        (today,)
+    )
+    sos_alerts = cur.fetchone()['count']
+
+    # Metric 3: Student Usage Analytics (Boarding vs Missed)
+    cur.execute("SELECT action_type, COUNT(*) as count FROM usage_logs GROUP BY action_type")
+    usage_data = cur.fetchall()
+    
+    # Convert usage_data to a dictionary for easier Chart.js handling
+    analytics = {item['action_type']: item['count'] for item in usage_data}
+
+    # Fetch recent logs for the "Live Activity Feed"
+    cur.execute("SELECT student_id, action_type, timestamp FROM usage_logs ORDER BY timestamp DESC LIMIT 5")
+    recent_logs = cur.fetchall()
+
+    student_metrics = fetch_student_metrics(cur)
+    department_summaries = fetch_department_summaries(cur)
+    student_rows = fetch_student_directory(cur, department_filter=student_department, search_term=student_search)
+    fee_rows = fetch_student_directory(cur, department_filter=fee_department, search_term=fee_search)
+    fee_summary = build_student_fee_summary(fee_rows)
+    driver_salary_rows = fetch_driver_salary_overview(cur)
+    report_dataset = build_report_dataset(
+        cur,
+        report_type=report_type,
+        from_date=report_from,
+        to_date=report_to,
+        department_filter=report_department
+    )
+    department_options = [row['department'] for row in department_summaries]
+    
+    cur.close()
+    conn.close()
+
+    return render_template(
+        'admin_dashboard.html',
+        active_tab=active_tab,
+        active_buses=active_buses,
+        sos_alerts=sos_alerts,
+        analytics=analytics,
+        recent_logs=recent_logs,
+        student_metrics=student_metrics,
+        department_summaries=department_summaries,
+        department_options=department_options,
+        student_rows=student_rows,
+        fee_rows=fee_rows,
+        fee_summary=fee_summary,
+        driver_salary_rows=driver_salary_rows,
+        report_dataset=report_dataset,
+        report_type=report_type,
+        report_from=report_from.isoformat(),
+        report_to=report_to.isoformat(),
+        report_department=report_department,
+        student_department=student_department,
+        student_search=student_search,
+        fee_department=fee_department,
+        fee_search=fee_search,
+        today_iso=today.isoformat(),
+        current_month_iso=default_from_date.isoformat(),
+        notice=request.args.get('notice'),
+        notice_type=request.args.get('notice_type', 'success')
+    )
+
+
+@app.route('/admin/student/update', methods=['POST'])
+def admin_update_student():
+    student_username = request.form.get('student_username')
+    full_name = (request.form.get('full_name') or '').strip()
+    roll_number = (request.form.get('roll_number') or '').strip()
+    department = (request.form.get('department') or '').strip()
+    contact_number = (request.form.get('contact_number') or '').strip()
+    student_stop = (request.form.get('student_stop') or '').strip()
+
+    try:
+        transport_fee = to_decimal(request.form.get('transport_fee'))
+    except Exception:
+        transport_fee = Decimal('0.00')
+    if transport_fee < 0:
+        transport_fee = Decimal('0.00')
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE users
+        SET full_name = %s,
+            roll_number = %s,
+            department = %s,
+            contact_number = %s,
+            student_stop = %s,
+            transport_fee = %s
+        WHERE username = %s AND role = 'student'
+        """,
+        (
+            full_name or None,
+            roll_number or None,
+            department or None,
+            contact_number or None,
+            student_stop or None,
+            transport_fee,
+            student_username
+        )
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(safe_admin_return_url('students'))
+
+
+@app.route('/admin/student/toggle_block/<student_username>', methods=['POST'])
+def admin_toggle_student_block(student_username):
+    action = (request.form.get('action') or '').strip().lower()
+    is_blocked = 1 if action == 'block' else 0
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET is_blocked = %s WHERE username = %s AND role = 'student'",
+        (is_blocked, student_username)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(safe_admin_return_url('students'))
+
+
+@app.route('/admin/student/fee_payment', methods=['POST'])
+def admin_record_student_fee_payment():
+    student_id = request.form.get('student_id')
+    payment_date = parse_date_value(request.form.get('payment_date'), date.today())
+    remarks = (request.form.get('remarks') or '').strip()
+
+    try:
+        amount_paid = to_decimal(request.form.get('amount_paid'))
+    except Exception:
+        amount_paid = Decimal('0.00')
+
+    if student_id and amount_paid > 0:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO student_fee_payments (student_id, amount_paid, payment_date, remarks)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (student_id, amount_paid, payment_date, remarks or None)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    return redirect(safe_admin_return_url('fees'))
+
+
+@app.route('/admin/driver/salary/update', methods=['POST'])
+def admin_update_driver_salary():
+    driver_id = request.form.get('driver_id')
+    try:
+        monthly_salary = to_decimal(request.form.get('monthly_salary'))
+    except Exception:
+        monthly_salary = Decimal('0.00')
+    if monthly_salary < 0:
+        monthly_salary = Decimal('0.00')
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE drivers SET monthly_salary = %s WHERE id = %s", (monthly_salary, driver_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(safe_admin_return_url('reports'))
+
+
+@app.route('/admin/driver/salary_payment', methods=['POST'])
+def admin_record_driver_salary_payment():
+    driver_id = request.form.get('driver_id')
+    salary_month = parse_date_value(request.form.get('salary_month'), date.today())
+    paid_date = parse_date_value(request.form.get('paid_date'), date.today())
+    remarks = (request.form.get('remarks') or '').strip()
+
+    try:
+        amount_paid = to_decimal(request.form.get('amount_paid'))
+    except Exception:
+        amount_paid = Decimal('0.00')
+
+    if driver_id and amount_paid > 0:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO staff_salary_payments (driver_id, salary_month, amount_paid, paid_date, remarks)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (driver_id, normalize_month_start(salary_month), amount_paid, paid_date, remarks or None)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    return redirect(safe_admin_return_url('reports'))
+
+
+@app.route('/admin/reports/export')
+def admin_export_report():
+    report_type = (request.args.get('report_type') or 'student').strip().lower()
+    if report_type not in {'student', 'staff'}:
+        report_type = 'student'
+
+    today = date.today()
+    from_date = parse_date_value(request.args.get('from_date'), today.replace(day=1))
+    to_date = parse_date_value(request.args.get('to_date'), today)
+    if from_date > to_date:
+        from_date, to_date = to_date, from_date
+
+    report_department = (request.args.get('report_department') or '').strip() if report_type == 'student' else ''
+    export_format = (request.args.get('format') or 'pdf').strip().lower()
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    dataset = build_report_dataset(
+        cur,
+        report_type=report_type,
+        from_date=from_date,
+        to_date=to_date,
+        department_filter=report_department
+    )
+    cur.close()
+    conn.close()
+
+    filename = f"{report_type}_report_{from_date.isoformat()}_{to_date.isoformat()}"
+    if export_format == 'excel':
+        return build_excel_report_response(dataset, filename)
+    return build_pdf_report_response(dataset, filename, from_date, to_date)
+
+@app.route('/api/live_tracking')
+def live_tracking():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    bus_id = request.args.get('bus_id', type=int)
+    route_id = request.args.get('route_id', type=int)
+
+    filters = []
+    params = []
+    if bus_id:
+        filters.append("b.id = %s")
+        params.append(bus_id)
+    else:
+        filters.append("(b.status = 'active' OR b.status = 'maintenance')")
+
+    if route_id:
+        filters.append("b.route_id = %s")
+        params.append(route_id)
+
+    where_clause = " AND ".join(filters) if filters else "1 = 1"
+    query = """
+        SELECT b.id, b.bus_number, b.current_lat, b.current_lng, b.status, b.speed, b.route_id,
+               b.updated_at, d.name as driver_name, d.contact as driver_contact,
+               r.route_name
+        FROM buses b
+        LEFT JOIN drivers d ON b.id = d.bus_id
+        LEFT JOIN routes r ON b.route_id = r.id
+        WHERE {where_clause}
+    """
+    cur.execute(query.format(where_clause=where_clause), params)
+    buses = enrich_live_bus_rows(cur, cur.fetchall())
+    cur.close()
+    conn.close()
+    return jsonify(buses)
+
+@app.route('/api/favorite_alerts')
+def favorite_alerts():
+    access_response = ensure_active_student_access(api=True)
+    if access_response is not None:
+        return access_response
+
+    student_id = session.get('username')
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT value FROM student_favorites WHERE student_id = %s AND type = 'route'", (student_id,))
+    favorite_routes = [row['value'] for row in cur.fetchall()]
+    if not favorite_routes:
+        cur.close()
+        conn.close()
+        return jsonify({'alerts': []})
+
+    # Fetch active buses for favorite routes
+    placeholders = ','.join(['%s'] * len(favorite_routes))
+    query = f"""
+        SELECT b.id, b.bus_number, b.current_lat, b.current_lng, b.speed, b.route_id, b.updated_at,
+               d.name AS driver_name, d.contact AS driver_contact, r.route_name, b.status
+        FROM buses b
+        LEFT JOIN drivers d ON d.bus_id = b.id
+        LEFT JOIN routes r ON r.id = b.route_id
+        WHERE b.route_id IN ({placeholders}) AND b.status = 'active'
+    """
+    cur.execute(query, favorite_routes)
+    buses = enrich_live_bus_rows(cur, cur.fetchall())
+
+    alerts = []
+    for bus in buses:
+        if bus['is_stale'] or bus['distance_to_stop_km'] is None or bus['eta_minutes'] is None:
+            continue
+
+        if bus['distance_to_stop_km'] <= 1.0 or bus['eta_minutes'] <= 5:
+            alerts.append({
+                'bus_id': bus['id'],
+                'route_id': bus['route_id'],
+                'bus_number': bus['bus_number'],
+                'stop_name': bus['nearest_stop_name'],
+                'distance_km': bus['distance_to_stop_km'],
+                'eta_minutes': int(bus['eta_minutes']),
+                'message': f"Bus {bus['bus_number']} on your favorite route is arriving at {bus['nearest_stop_name']} in {int(bus['eta_minutes'])} min ({bus['distance_to_stop_km']} km away).",
+                'alert': True
+            })
+
+    cur.close()
+    conn.close()
+    return jsonify({'alerts': alerts})
+
+# API Endpoint for Real-time Chart Updates (AJAX)
+@app.route('/api/usage_stats')
+def usage_stats():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT HOUR(timestamp) as hour, COUNT(*) as count FROM usage_logs WHERE action_type='boarding' GROUP BY HOUR(timestamp)")
+    data = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify(data)
+
+@app.route('/update_location', methods=['POST'])
+def update_location():
+    if not session.get('logged_in') or session.get('role') != 'driver':
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+
+    data = request.json
+    bus_id = session.get('bus_id')
+    lat = data.get('lat')
+    lng = data.get('lng')
+    speed = data.get('speed', 0)
+
+    if not bus_id or lat is None or lng is None:
+        return jsonify({'status': 'error', 'message': 'Missing location payload'}), 400
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE buses SET current_lat=%s, current_lng=%s, speed=%s WHERE id=%s",
+        (lat, lng, speed, bus_id)
+    )
+    conn.commit()
+
+    cur.execute(
+        """
+        SELECT b.id, b.bus_number, b.current_lat, b.current_lng, b.status, b.speed, b.route_id,
+               b.updated_at, d.name AS driver_name, d.contact AS driver_contact, r.route_name
+        FROM buses b
+        LEFT JOIN drivers d ON d.bus_id = b.id
+        LEFT JOIN routes r ON r.id = b.route_id
+        WHERE b.id = %s
+        """,
+        (bus_id,)
+    )
+    bus_row = cur.fetchone()
+    live_bus = enrich_live_bus_rows(cur, [bus_row])[0] if bus_row else None
+
+    cur.close()
+    conn.close()
+    return jsonify({
+        "status": "success",
+        "bus": live_bus,
+        "server_time": datetime.now().strftime('%H:%M:%S')
+    })
+
+@app.route('/api/student/smart_alert', methods=['POST'])
+@app.route('/check_missed_bus', methods=['POST'])
+def check_missed_bus():
+    access_response = ensure_active_student_access(api=True)
+    if access_response is not None:
+        return access_response
+
+    data = request.json or {}
+    route_id = data.get('route_id')
+    student_lat = data.get('lat')
+    student_lng = data.get('lng')
+    preferred_stop_id = data.get('stop_id')
+
+    try:
+        route_id = int(route_id)
+        student_lat = float(student_lat)
+        student_lng = float(student_lng)
+        preferred_stop_id = int(preferred_stop_id) if preferred_stop_id is not None else None
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Missing or invalid route/location payload'}), 400
+
+    student_id = session.get('username')
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cleanup_expired_smart_alerts(cur)
+    route_stops = fetch_route_stops(cur, route_id)
+    if not route_stops:
+        cur.close()
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'No stops found for the selected route'}), 404
+
+    student_profile = fetch_student_profile(cur, student_id)
+    target_stop, distance_m = find_target_stop_for_alert(
+        route_stops,
+        student_lat,
+        student_lng,
+        preferred_stop_name=student_profile.get('student_stop'),
+        preferred_stop_id=preferred_stop_id
+    )
+
+    if not target_stop or distance_m is None:
+        cur.close()
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'Unable to identify a nearby bus stop'}), 404
+
+    if float(distance_m) > SMART_ALERT_RADIUS_METERS:
+        cur.close()
+        conn.close()
+        return jsonify({
+            'status': 'error',
+            'message': f"Move closer to {target_stop['stop_name']} to send the alert.",
+            'stop_name': target_stop['stop_name'],
+            'distance_m': round(float(distance_m), 1),
+            'can_alert': False
+        }), 400
+
+    cur.execute("SELECT route_name FROM routes WHERE id = %s", (route_id,))
+    route = cur.fetchone() or {}
+    route_name = route.get('route_name') or 'your route'
+
+    next_bus = find_next_bus_for_stop(cur, route_id, target_stop['id'], route_stops=route_stops)
+    expires_at = datetime.now() + timedelta(minutes=SMART_ALERT_TTL_MINUTES)
+    bus_id = next_bus.get('id') if next_bus else None
+    driver_id = next_bus.get('driver_id') if next_bus else None
+
+    cur.execute(
+        """
+        SELECT id
+        FROM smart_stop_alerts
+        WHERE student_id = %s
+          AND route_id = %s
+          AND stop_id = %s
+          AND status = 'active'
+          AND expires_at >= NOW()
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (student_id, route_id, target_stop['id'])
+    )
+    existing_alert = cur.fetchone()
+
+    if existing_alert:
+        cur.execute(
+            """
+            UPDATE smart_stop_alerts
+            SET bus_id = %s,
+                driver_id = %s,
+                student_lat = %s,
+                student_lng = %s,
+                distance_m = %s,
+                expires_at = %s
+            WHERE id = %s
+            """,
+            (
+                bus_id,
+                driver_id,
+                student_lat,
+                student_lng,
+                round(float(distance_m), 2),
+                expires_at,
+                existing_alert['id']
+            )
+        )
+        alert_id = existing_alert['id']
+        duplicate_alert = True
+    else:
+        cur.execute(
+            """
+            INSERT INTO smart_stop_alerts (
+                student_id, route_id, stop_id, bus_id, driver_id,
+                student_lat, student_lng, distance_m, expires_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                student_id,
+                route_id,
+                target_stop['id'],
+                bus_id,
+                driver_id,
+                student_lat,
+                student_lng,
+                round(float(distance_m), 2),
+                expires_at
+            )
+        )
+        alert_id = cur.lastrowid
+        duplicate_alert = False
+
+    if not duplicate_alert:
+        generic_message = f"Student waiting at {target_stop['stop_name']} on {route_name}."
+        if next_bus and next_bus.get('bus_number'):
+            generic_message += f" Notify bus {next_bus['bus_number']}."
+        cur.execute("INSERT INTO alerts (message, created_at) VALUES (%s, NOW())", (generic_message,))
+
+    cur.execute(
+        """
+        INSERT INTO usage_logs (student_id, action_type, lat, lng)
+        VALUES (%s, 'smart_alert', %s, %s)
+        """,
+        (student_id, student_lat, student_lng)
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    if next_bus and next_bus.get('driver_name'):
+        message = (
+            f"Alert sent for {target_stop['stop_name']}. "
+            f"{next_bus['driver_name']} has been notified that a student is waiting there."
+        )
+    elif next_bus and next_bus.get('bus_number'):
+        message = (
+            f"Alert sent for {target_stop['stop_name']}. "
+            f"Bus {next_bus['bus_number']} will see the stop request."
+        )
+    else:
+        message = (
+            f"Alert saved for {target_stop['stop_name']}. "
+            "The next driver on this route will see it when they come online."
+        )
+
+    return jsonify({
+        'status': 'success',
+        'alert': True,
+        'alert_id': alert_id,
+        'duplicate': duplicate_alert,
+        'stop_name': target_stop['stop_name'],
+        'distance_m': round(float(distance_m), 1),
+        'bus_number': next_bus.get('bus_number') if next_bus else None,
+        'driver_name': next_bus.get('driver_name') if next_bus else None,
+        'expires_in_minutes': SMART_ALERT_TTL_MINUTES,
+        'message': message
+    })
+
+@app.route('/api/driver/smart_alerts')
+def driver_smart_alerts():
+    if not session.get('logged_in') or session.get('role') != 'driver':
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+
+    bus_id = session.get('bus_id')
+    driver_id = session.get('driver_id')
+    conn = get_db_connection()
+    cur = conn.cursor()
+    current_route_id = get_driver_current_route_id(cur, driver_id, bus_id)
+    alerts = fetch_driver_smart_alerts(cur, current_route_id, bus_id=bus_id, driver_id=driver_id)
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        'status': 'success',
+        'alerts': alerts,
+        'count': len(alerts)
+    })
+
+@app.route('/admin/broadcast', methods=['POST'])
+def broadcast_alert():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    message = request.form.get('message')
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Assuming an 'alerts' table exists
+    cur.execute("INSERT INTO alerts (message, created_at) VALUES (%s, NOW())", (message,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/api/update_bus_status', methods=['POST'])
+def update_bus_status():
+    if not session.get('logged_in'): return jsonify({'status':'error'}), 403
+    data = request.json
+    bus_id = session.get('bus_id')
+    status = data.get('status')
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE buses SET status=%s WHERE id=%s", (status, bus_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/driver/sos', methods=['POST'])
+def driver_sos():
+    if not session.get('logged_in'): return jsonify({'status':'error'}), 403
+    data = request.json
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Log SOS action
+    cur.execute("INSERT INTO usage_logs (student_id, action_type, lat, lng) VALUES (%s, 'sos', %s, %s)", 
+                (session.get('username'), data.get('lat'), data.get('lng')))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({'status': 'success'})
+
+@app.route('/api/driver/report_issue', methods=['POST'])
+def report_issue():
+    if not session.get('logged_in'): return jsonify({'status':'error'}), 403
+    data = request.json
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO alerts (message, created_at) VALUES (%s, NOW())", 
+                (f"DRIVER REPORT ({session.get('username')}): {data.get('issue')} - {data.get('details')}",))
+    conn.commit()
+    conn.close()
+    return jsonify({'status': 'success'})
+
+@app.route('/admin/manage')
+def admin_manage():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Fetch data for management tabs
+    cur.execute("SELECT * FROM buses")
+    buses = cur.fetchall()
+    
+    # Wrap in try-except in case tables don't exist yet
+    try:
+        cur.execute("SELECT * FROM routes")
+        routes = cur.fetchall()
+    except: routes = []
+
+    try:
+        cur.execute("SELECT * FROM drivers")
+        drivers = cur.fetchall()
+    except: drivers = []
+
+    # Fetch Assignments for Today and Filter Available Drivers
+    assignments = []
+    available_drivers = drivers # Default to all if assignment table fails or is empty
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        query = """
+            SELECT a.id, a.driver_id, d.name as driver_name, r.route_name, a.assignment_date 
+            FROM driver_route_assignments a 
+            JOIN drivers d ON a.driver_id = d.id 
+            JOIN routes r ON a.route_id = r.id 
+            WHERE a.assignment_date = %s
+        """
+        cur.execute(query, (today,))
+        assignments = cur.fetchall()
+        
+        assigned_ids = {row['driver_id'] for row in assignments}
+        available_drivers = [d for d in drivers if d['id'] not in assigned_ids]
+    except Exception as e:
+        print(f"Assignment fetch error: {e}")
+    
+    cur.close()
+    conn.close()
+    return render_template('admin_management.html', buses=buses, routes=routes, drivers=drivers, assignments=assignments, available_drivers=available_drivers)
+
+@app.route('/admin/add_bus', methods=['POST'])
+def add_bus():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    bus_number = request.form['bus_number']
+    status = request.form['status']
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO buses (bus_number, status) VALUES (%s, %s)", (bus_number, status))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/edit_bus', methods=['POST'])
+def edit_bus():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    bus_id = request.form['bus_id']
+    bus_number = request.form['bus_number']
+    status = request.form['status']
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE buses SET bus_number=%s, status=%s WHERE id=%s", (bus_number, status, bus_id))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/delete_bus/<int:id>', methods=['POST'])
+def delete_bus(id):
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # Optional: Check for dependencies before deleting
+    cur.execute("DELETE FROM buses WHERE id=%s", (id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/add_route', methods=['POST'])
+def add_route():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    route_name = request.form['route_name']
+    start_time = request.form['start_time']
+    end_time = request.form['end_time']
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO routes (route_name, start_time, end_time) VALUES (%s, %s, %s)", (route_name, start_time, end_time))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/delete_route/<int:id>', methods=['POST'])
+def delete_route(id):
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM routes WHERE id=%s", (id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/edit_driver', methods=['POST'])
+def edit_driver():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    driver_id = request.form['driver_id']
+    name = request.form['name']
+    contact = request.form['contact']
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE drivers SET name=%s, contact=%s WHERE id=%s", (name, contact, driver_id))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/add_driver', methods=['POST'])
+def add_driver():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    name = request.form['name']
+    contact = request.form['contact']
+    bus_id = request.form.get('bus_id')
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO drivers (name, contact, bus_id) VALUES (%s, %s, %s)", (name, contact, bus_id if bus_id else None))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/delete_driver/<int:id>', methods=['POST'])
+def delete_driver(id):
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM drivers WHERE id=%s", (id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/assign_route', methods=['POST'])
+def assign_route():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    driver_id = request.form['driver_id']
+    route_id = request.form['route_id']
+    assignment_date = request.form['assignment_date']
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO driver_route_assignments (driver_id, route_id, assignment_date) VALUES (%s, %s, %s)", (driver_id, route_id, assignment_date))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/delete_assignment/<int:id>', methods=['POST'])
+def delete_assignment(id):
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM driver_route_assignments WHERE id=%s", (id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/get_stops/<int:route_id>')
+def admin_get_stops(route_id):
+    if not session.get('logged_in'): return jsonify({'error': 'Unauthorized'}), 403
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM bus_stops WHERE route_id = %s ORDER BY id ASC", (route_id,))
+    stops = cur.fetchall()
+    conn.close()
+    return jsonify(stops)
+
+@app.route('/admin/add_stop', methods=['POST'])
+def admin_add_stop():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    route_id = request.form['route_id']
+    stop_name = request.form['stop_name']
+    lat = request.form['lat']
+    lng = request.form['lng']
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO bus_stops (route_id, stop_name, lat, lng) VALUES (%s, %s, %s, %s)", 
+                (route_id, stop_name, lat, lng))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/delete_stop/<int:stop_id>', methods=['POST'])
+def admin_delete_stop(stop_id):
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM bus_stops WHERE id=%s", (stop_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_manage'))
+
+if __name__ == '__main__':
+    host = os.getenv('BUS_TRACKING_HOST', '0.0.0.0')
+    port = int(os.getenv('BUS_TRACKING_PORT', '5000'))
+    debug = os.getenv('BUS_TRACKING_DEBUG', 'true').lower() == 'true'
+    local_ip = get_local_ip()
+
+    print(f"Bus tracking server running on http://127.0.0.1:{port}")
+    print(f"Mobile access URL: http://{local_ip}:{port}")
+    print("Keep your phone and computer on the same Wi-Fi network for mobile access.")
+
+    app.run(host=host, port=port, debug=debug, threaded=True)

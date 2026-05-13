@@ -1,0 +1,1347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin ERP Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --shell-bg: #eef3f8;
+            --panel-bg: #ffffff;
+            --nav-bg: #14213d;
+            --nav-muted: #d0d8e2;
+            --nav-active: #274c77;
+            --accent: #0d6efd;
+            --border-soft: #dde6f0;
+            --text-soft: #64748b;
+        }
+
+        body {
+            background: linear-gradient(180deg, #f3f7fb 0%, #e9eff6 100%);
+            overflow-x: hidden;
+            color: #102033;
+        }
+
+        .sidebar {
+            height: 100vh;
+            width: 260px;
+            position: fixed;
+            top: 0;
+            left: 0;
+            background: linear-gradient(180deg, #14213d 0%, #0f172a 100%);
+            padding: 24px 0;
+            z-index: 1000;
+            box-shadow: 10px 0 40px rgba(15, 23, 42, 0.14);
+        }
+
+        .sidebar .brand {
+            padding: 0 24px 24px;
+            color: #ffffff;
+            font-size: 1.45rem;
+            font-weight: 800;
+            letter-spacing: 0.02em;
+        }
+
+        .sidebar a {
+            padding: 14px 24px;
+            text-decoration: none;
+            font-size: 1rem;
+            color: var(--nav-muted);
+            display: block;
+            transition: background 0.2s ease, color 0.2s ease;
+        }
+
+        .sidebar a:hover,
+        .sidebar a.active {
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.08);
+            border-left: 4px solid #62b6cb;
+        }
+
+        .main-content {
+            margin-left: 260px;
+            padding: 24px;
+        }
+
+        .panel-card,
+        .stat-card {
+            border: 0;
+            border-radius: 22px;
+            background: var(--panel-bg);
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
+        }
+
+        .stat-card {
+            padding: 20px;
+            height: 100%;
+        }
+
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            margin-bottom: 18px;
+            flex-wrap: wrap;
+        }
+
+        .section-head h4,
+        .section-head h5 {
+            margin: 0;
+            color: #0f172a;
+        }
+
+        .section-head p {
+            margin: 6px 0 0;
+            color: var(--text-soft);
+        }
+
+        .icon-box {
+            width: 54px;
+            height: 54px;
+            border-radius: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+        }
+
+        .tab-strip {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        .tab-strip a {
+            text-decoration: none;
+            padding: 11px 16px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.8);
+            color: #123;
+            font-weight: 600;
+            border: 1px solid transparent;
+        }
+
+        .tab-strip a.active {
+            background: #102a43;
+            color: #fff;
+            border-color: #102a43;
+        }
+
+        #map {
+            height: 500px;
+            width: 100%;
+            border-radius: 20px;
+        }
+
+        .fleet-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 12px;
+        }
+
+        .fleet-card,
+        .soft-card {
+            border: 1px solid var(--border-soft);
+            border-radius: 18px;
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            padding: 16px;
+        }
+
+        .fleet-card .title {
+            font-weight: 700;
+            color: #14314d;
+        }
+
+        .fleet-card .meta,
+        .soft-meta {
+            font-size: 0.9rem;
+            color: #5f6f82;
+        }
+
+        .fleet-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            border-radius: 999px;
+            padding: 0.3rem 0.7rem;
+            font-size: 0.76rem;
+            font-weight: 700;
+        }
+
+        .fleet-status.live {
+            background: #d6f0ef;
+            color: #0d6b61;
+        }
+
+        .fleet-status.waiting {
+            background: #fff4e5;
+            color: #8d5d18;
+        }
+
+        .fleet-status.maintenance {
+            background: #f1f5f9;
+            color: #475569;
+        }
+
+        .table-shell {
+            border-radius: 18px;
+            border: 1px solid var(--border-soft);
+            overflow: hidden;
+        }
+
+        .table-shell .table {
+            margin-bottom: 0;
+        }
+
+        .table-shell th {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: #475569;
+            background: #f8fafc;
+            border-bottom: 1px solid var(--border-soft);
+        }
+
+        .table-shell td {
+            vertical-align: middle;
+        }
+
+        .metric-caption {
+            color: var(--text-soft);
+            font-size: 0.84rem;
+            margin-top: 4px;
+        }
+
+        .mono-value {
+            font-variant-numeric: tabular-nums;
+        }
+
+        .filter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 14px;
+            align-items: end;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 14px;
+        }
+
+        .summary-card {
+            border-radius: 18px;
+            border: 1px solid var(--border-soft);
+            background: linear-gradient(180deg, #fff 0%, #f7fbff 100%);
+            padding: 18px;
+        }
+
+        .summary-label {
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            color: #64748b;
+            letter-spacing: 0.04em;
+            margin-bottom: 8px;
+        }
+
+        .summary-value {
+            font-size: 1.5rem;
+            font-weight: 800;
+            color: #0f172a;
+        }
+
+        .badge-soft {
+            background: #e2e8f0;
+            color: #334155;
+            font-weight: 700;
+        }
+
+        .report-toggle {
+            max-width: 220px;
+        }
+
+        .modal .form-control,
+        .modal .form-select,
+        .panel-card .form-control,
+        .panel-card .form-select {
+            border-radius: 12px;
+            min-height: 46px;
+        }
+
+        @media (max-width: 991px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: static;
+            }
+
+            .main-content {
+                margin-left: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="brand"><i class="fas fa-bus"></i> ERP Admin</div>
+        <a href="{{ url_for('admin_dashboard', tab='overview') }}" class="{{ 'active' if active_tab == 'overview' else '' }}">
+            <i class="fas fa-chart-line me-2"></i> Overview
+        </a>
+        <a href="{{ url_for('admin_manage') }}">
+            <i class="fas fa-cogs me-2"></i> Fleet Manager
+        </a>
+        <a href="{{ url_for('admin_dashboard', tab='students') }}" class="{{ 'active' if active_tab == 'students' else '' }}">
+            <i class="fas fa-users me-2"></i> Students
+        </a>
+        <a href="{{ url_for('admin_dashboard', tab='fees') }}" class="{{ 'active' if active_tab == 'fees' else '' }}">
+            <i class="fas fa-wallet me-2"></i> Student Fees
+        </a>
+        <a href="{{ url_for('admin_dashboard', tab='reports') }}" class="{{ 'active' if active_tab == 'reports' else '' }}">
+            <i class="fas fa-file-alt me-2"></i> Reports
+        </a>
+        <a href="{{ url_for('logout') }}" class="mt-5 text-danger">
+            <i class="fas fa-sign-out-alt me-2"></i> Logout
+        </a>
+    </div>
+
+    <div class="main-content">
+        <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm rounded-4 mb-4 px-3 py-3">
+            <div class="container-fluid px-0">
+                <div>
+                    <div class="text-muted small">Transport Administration</div>
+                    <div class="fw-bold fs-5">
+                        {% if active_tab == 'students' %}Student Directory{% elif active_tab == 'fees' %}Student Fee Control{% elif active_tab == 'reports' %}Attendance and Payment Reports{% else %}Operations Overview{% endif %}
+                    </div>
+                </div>
+                <button class="btn btn-outline-primary btn-sm ms-auto" data-bs-toggle="modal" data-bs-target="#broadcastModal">
+                    <i class="fas fa-bullhorn me-1"></i> Broadcast Alert
+                </button>
+            </div>
+        </nav>
+
+        <div class="tab-strip">
+            <a href="{{ url_for('admin_dashboard', tab='overview') }}" class="{{ 'active' if active_tab == 'overview' else '' }}">Dashboard</a>
+            <a href="{{ url_for('admin_dashboard', tab='students') }}" class="{{ 'active' if active_tab == 'students' else '' }}">Students</a>
+            <a href="{{ url_for('admin_dashboard', tab='fees') }}" class="{{ 'active' if active_tab == 'fees' else '' }}">Student Fees</a>
+            <a href="{{ url_for('admin_dashboard', tab='reports') }}" class="{{ 'active' if active_tab == 'reports' else '' }}">Reports</a>
+        </div>
+
+        {% if notice %}
+        <div class="alert alert-{{ notice_type }} rounded-4 border-0 shadow-sm">{{ notice }}</div>
+        {% endif %}
+
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="text-muted mb-1">Active Buses</h6>
+                            <h3 class="fw-bold mb-0 mono-value" id="activeBusesCount">{{ active_buses }}</h3>
+                        </div>
+                        <div class="icon-box bg-success bg-opacity-10 text-success"><i class="fas fa-bus"></i></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="text-muted mb-1">SOS Alerts Today</h6>
+                            <h3 class="fw-bold mb-0 text-danger mono-value">{{ sos_alerts }}</h3>
+                        </div>
+                        <div class="icon-box bg-danger bg-opacity-10 text-danger"><i class="fas fa-bell"></i></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="text-muted mb-1">Total Boardings</h6>
+                            <h3 class="fw-bold mb-0 mono-value">{{ analytics.get('boarding', 0) }}</h3>
+                        </div>
+                        <div class="icon-box bg-primary bg-opacity-10 text-primary"><i class="fas fa-user-check"></i></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h6 class="text-muted mb-1">System Status</h6>
+                            <h5 class="fw-bold mb-0 text-success" id="systemStatusText">Online</h5>
+                            <div class="metric-caption">Live GPS + attendance feeds</div>
+                        </div>
+                        <div class="icon-box bg-info bg-opacity-10 text-info"><i class="fas fa-server"></i></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% if active_tab == 'overview' %}
+        <div class="row g-4 mb-4">
+            <div class="col-lg-8">
+                <div class="panel-card">
+                    <div class="p-4 pb-0">
+                        <div class="section-head">
+                            <div>
+                                <h4>Live Fleet Tracking</h4>
+                                <p>Auto-refresh every 3 seconds with route and stop awareness.</p>
+                            </div>
+                            <span class="badge bg-success" id="fleetRefreshStatus">Live</span>
+                        </div>
+                    </div>
+                    <div class="px-4 pb-4">
+                        <div id="map"></div>
+                        <div class="pt-3">
+                            <div id="fleetInfoList" class="fleet-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="panel-card h-100">
+                    <div class="p-4 h-100 d-flex flex-column">
+                        <div class="section-head">
+                            <div>
+                                <h4>Usage Analytics</h4>
+                                <p>Transport usage by event type.</p>
+                            </div>
+                        </div>
+                        <div class="flex-grow-1 d-flex align-items-center justify-content-center">
+                            <canvas id="usageChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="p-4">
+                <div class="section-head">
+                    <div>
+                        <h4>Recent Activity Logs</h4>
+                        <p>Latest student and emergency events captured in the system.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table class="table table-hover align-middle">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>User ID</th>
+                                <th>Action</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for log in recent_logs %}
+                            <tr>
+                                <td>{{ log.timestamp }}</td>
+                                <td>{{ log.student_id }}</td>
+                                <td>{{ log.action_type | upper }}</td>
+                                <td>
+                                    <span class="badge bg-{{ 'danger' if log.action_type == 'sos' else 'success' }}">
+                                        {{ 'Critical' if log.action_type == 'sos' else 'Normal' }}
+                                    </span>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center text-muted py-4">No activity recorded yet.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        {% elif active_tab == 'students' %}
+        <div class="summary-grid mb-4">
+            <div class="summary-card">
+                <div class="summary-label">Students Registered</div>
+                <div class="summary-value mono-value">{{ student_metrics.total_students }}</div>
+                <div class="soft-meta">{{ student_metrics.departments_count }} departments in system</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Student IDs Created</div>
+                <div class="summary-value mono-value">{{ student_metrics.ids_created }}</div>
+                <div class="soft-meta">Login IDs available for registered students</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Active IDs</div>
+                <div class="summary-value mono-value text-success">{{ student_metrics.active_ids }}</div>
+                <div class="soft-meta">Students currently allowed to sign in</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Blocked IDs</div>
+                <div class="summary-value mono-value text-danger">{{ student_metrics.blocked_ids }}</div>
+                <div class="soft-meta">Blocked students must contact transport admin</div>
+            </div>
+        </div>
+
+        <div class="row g-4 mb-4">
+            <div class="col-lg-8">
+                <div class="panel-card">
+                    <div class="p-4">
+                        <div class="section-head">
+                            <div>
+                                <h4>Students Report</h4>
+                                <p>Department-wise student list with last present details and account control.</p>
+                            </div>
+                        </div>
+                        <form method="GET" action="{{ url_for('admin_dashboard') }}" class="filter-grid mb-4">
+                            <input type="hidden" name="tab" value="students">
+                            <div>
+                                <label class="form-label">Department</label>
+                                <select class="form-select" name="student_department">
+                                    <option value="">All departments</option>
+                                    {% for department_name in department_options %}
+                                    <option value="{{ department_name }}" {{ 'selected' if student_department == department_name else '' }}>{{ department_name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="form-label">Student Search</label>
+                                <input class="form-control" type="text" name="student_search" value="{{ student_search }}" placeholder="Name, ID or roll number">
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="submit" class="btn btn-primary w-100"><i class="fas fa-filter me-1"></i> Apply</button>
+                                <a href="{{ url_for('admin_dashboard', tab='students') }}" class="btn btn-outline-secondary w-100">Reset</a>
+                            </div>
+                        </form>
+
+                        <div class="table-shell">
+                            <table class="table table-hover align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Student</th>
+                                        <th>Department</th>
+                                        <th>Contact</th>
+                                        <th>Stop</th>
+                                        <th>Total Presents</th>
+                                        <th>Last Present</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for row in student_rows %}
+                                    <tr>
+                                        <td>
+                                            <div class="fw-semibold">{{ row.full_name }}</div>
+                                            <div class="text-muted small">{{ row.username }}{% if row.roll_number != '--' %} | {{ row.roll_number }}{% endif %}</div>
+                                        </td>
+                                        <td>{{ row.department }}</td>
+                                        <td>{{ row.contact_number }}</td>
+                                        <td>{{ row.student_stop }}</td>
+                                        <td class="mono-value">{{ row.present_days_total }}</td>
+                                        <td>{{ row.last_present_display }}</td>
+                                        <td>
+                                            <span class="badge {{ 'bg-danger' if row.is_blocked else 'bg-success' }}">
+                                                {{ 'Blocked' if row.is_blocked else 'Active' }}
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <div class="d-flex flex-wrap gap-2">
+                                                <button
+                                                    type="button"
+                                                    class="btn btn-sm btn-outline-primary student-edit-btn"
+                                                    data-bs-toggle="modal"
+                                                    data-bs-target="#studentProfileModal"
+                                                    data-student="{{ row.username }}"
+                                                    data-full-name="{{ row.full_name }}"
+                                                    data-roll-number="{{ '' if row.roll_number == '--' else row.roll_number }}"
+                                                    data-department="{{ '' if row.department == 'Unassigned' else row.department }}"
+                                                    data-contact-number="{{ '' if row.contact_number == '--' else row.contact_number }}"
+                                                    data-student-stop="{{ '' if row.student_stop == '--' else row.student_stop }}"
+                                                    data-transport-fee="{{ row.transport_fee }}"
+                                                >
+                                                    <i class="fas fa-pen me-1"></i> Edit
+                                                </button>
+                                                <form method="POST" action="{{ url_for('admin_toggle_student_block', student_username=row.username) }}">
+                                                    <input type="hidden" name="action" value="{{ 'unblock' if row.is_blocked else 'block' }}">
+                                                    <input type="hidden" name="return_url" value="{{ request.full_path }}">
+                                                    <button type="submit" class="btn btn-sm {{ 'btn-success' if row.is_blocked else 'btn-outline-danger' }}">
+                                                        <i class="fas {{ 'fa-unlock' if row.is_blocked else 'fa-ban' }} me-1"></i>
+                                                        {{ 'Unblock' if row.is_blocked else 'Block' }}
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {% else %}
+                                    <tr>
+                                        <td colspan="8" class="text-center text-muted py-4">No students found for the selected filter.</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-4">
+                <div class="panel-card h-100">
+                    <div class="p-4">
+                        <div class="section-head">
+                            <div>
+                                <h4>Department Summary</h4>
+                                <p>Quick student totals grouped by department.</p>
+                            </div>
+                        </div>
+                        <div class="table-shell">
+                            <table class="table align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>Department</th>
+                                        <th>Total</th>
+                                        <th>Blocked</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for department_row in department_summaries %}
+                                    <tr>
+                                        <td>{{ department_row.department }}</td>
+                                        <td class="mono-value">{{ department_row.total_students }}</td>
+                                        <td class="mono-value">{{ department_row.blocked_students }}</td>
+                                    </tr>
+                                    {% else %}
+                                    <tr>
+                                        <td colspan="3" class="text-center text-muted py-4">No department data available.</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% elif active_tab == 'fees' %}
+        <div class="row g-4 mb-4">
+            <div class="col-lg-5">
+                <div class="panel-card h-100">
+                    <div class="p-4">
+                        <div class="section-head">
+                            <div>
+                                <h4>Student Fee Filter</h4>
+                                <p>Student-wise or department-wise fee visibility.</p>
+                            </div>
+                        </div>
+                        <form method="GET" action="{{ url_for('admin_dashboard') }}" class="filter-grid">
+                            <input type="hidden" name="tab" value="fees">
+                            <div>
+                                <label class="form-label">Department</label>
+                                <select class="form-select" name="fee_department">
+                                    <option value="">All departments</option>
+                                    {% for department_name in department_options %}
+                                    <option value="{{ department_name }}" {{ 'selected' if fee_department == department_name else '' }}>{{ department_name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="form-label">Student Search</label>
+                                <input class="form-control" type="text" name="fee_search" value="{{ fee_search }}" placeholder="Student name or ID">
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="submit" class="btn btn-primary w-100"><i class="fas fa-filter me-1"></i> Apply</button>
+                                <a href="{{ url_for('admin_dashboard', tab='fees') }}" class="btn btn-outline-secondary w-100">Reset</a>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-7">
+                <div class="summary-grid">
+                    <div class="summary-card">
+                        <div class="summary-label">Filtered Students</div>
+                        <div class="summary-value mono-value">{{ fee_summary.students_count }}</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Total Fee</div>
+                        <div class="summary-value mono-value">{{ '%.2f'|format(fee_summary.total_fee) }}</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Paid Fee</div>
+                        <div class="summary-value mono-value text-success">{{ '%.2f'|format(fee_summary.paid_fee) }}</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-label">Balance Amount</div>
+                        <div class="summary-value mono-value text-danger">{{ '%.2f'|format(fee_summary.balance_fee) }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="p-4">
+                <div class="section-head">
+                    <div>
+                        <h4>Student Fee Ledger</h4>
+                        <p>Total fee, paid fee and balance amount for each student.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table class="table table-hover align-middle">
+                        <thead>
+                            <tr>
+                                <th>Student</th>
+                                <th>Department</th>
+                                <th>Total Fee</th>
+                                <th>Paid Fee</th>
+                                <th>Balance Amount</th>
+                                <th>Last Payment</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in fee_rows %}
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">{{ row.full_name }}</div>
+                                    <div class="text-muted small">{{ row.username }}</div>
+                                </td>
+                                <td>{{ row.department }}</td>
+                                <td class="mono-value">{{ '%.2f'|format(row.transport_fee) }}</td>
+                                <td class="mono-value text-success">{{ '%.2f'|format(row.paid_fee) }}</td>
+                                <td class="mono-value text-danger">{{ '%.2f'|format(row.balance_fee) }}</td>
+                                <td>{{ row.last_payment_display }}</td>
+                                <td>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-outline-primary student-edit-btn"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#studentProfileModal"
+                                            data-student="{{ row.username }}"
+                                            data-full-name="{{ row.full_name }}"
+                                            data-roll-number="{{ '' if row.roll_number == '--' else row.roll_number }}"
+                                            data-department="{{ '' if row.department == 'Unassigned' else row.department }}"
+                                            data-contact-number="{{ '' if row.contact_number == '--' else row.contact_number }}"
+                                            data-student-stop="{{ '' if row.student_stop == '--' else row.student_stop }}"
+                                            data-transport-fee="{{ row.transport_fee }}"
+                                        >
+                                            <i class="fas fa-wallet me-1"></i> Set Fee
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-success student-payment-btn"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#studentPaymentModal"
+                                            data-student="{{ row.username }}"
+                                            data-name="{{ row.full_name }}"
+                                            data-balance="{{ row.balance_fee }}"
+                                        >
+                                            <i class="fas fa-money-bill-wave me-1"></i> Record Payment
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="7" class="text-center text-muted py-4">No fee rows available for the selected filter.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        {% elif active_tab == 'reports' %}
+        <div class="panel-card mb-4">
+            <div class="p-4">
+                <div class="section-head">
+                    <div>
+                        <h4>Generate Reports</h4>
+                        <p>Select student or staff and generate report from date to date, then export to PDF or Excel.</p>
+                    </div>
+                </div>
+                <form method="GET" action="{{ url_for('admin_dashboard') }}" class="filter-grid">
+                    <input type="hidden" name="tab" value="reports">
+                    <div>
+                        <label class="form-label">Report Type</label>
+                        <select class="form-select report-toggle" name="report_type" id="reportTypeSelect">
+                            <option value="student" {{ 'selected' if report_type == 'student' else '' }}>Students</option>
+                            <option value="staff" {{ 'selected' if report_type == 'staff' else '' }}>Staff (Drivers)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">From Date</label>
+                        <input class="form-control" type="date" name="from_date" value="{{ report_from }}">
+                    </div>
+                    <div>
+                        <label class="form-label">To Date</label>
+                        <input class="form-control" type="date" name="to_date" value="{{ report_to }}">
+                    </div>
+                    <div id="reportDepartmentWrap">
+                        <label class="form-label">Department</label>
+                        <select class="form-select" name="report_department">
+                            <option value="">All departments</option>
+                            {% for department_name in department_options %}
+                            <option value="{{ department_name }}" {{ 'selected' if report_department == department_name else '' }}>{{ department_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-chart-bar me-1"></i> Preview</button>
+                        <button type="submit" class="btn btn-outline-danger" formaction="{{ url_for('admin_export_report') }}" formmethod="GET" name="format" value="pdf">
+                            <i class="fas fa-file-pdf me-1"></i> Export PDF
+                        </button>
+                        <button type="submit" class="btn btn-outline-success" formaction="{{ url_for('admin_export_report') }}" formmethod="GET" name="format" value="excel">
+                            <i class="fas fa-file-excel me-1"></i> Export Excel
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="summary-grid mb-4">
+            <div class="summary-card">
+                <div class="summary-label">{{ 'Students' if report_type == 'student' else 'Drivers' }}</div>
+                <div class="summary-value mono-value">{{ report_dataset.summary.records }}</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Present Days</div>
+                <div class="summary-value mono-value">{{ report_dataset.summary.present_days }}</div>
+            </div>
+            {% if report_type == 'student' %}
+            <div class="summary-card">
+                <div class="summary-label">Total Fee</div>
+                <div class="summary-value mono-value">{{ '%.2f'|format(report_dataset.summary.total_fee) }}</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Balance Fee</div>
+                <div class="summary-value mono-value text-danger">{{ '%.2f'|format(report_dataset.summary.balance_fee) }}</div>
+            </div>
+            {% else %}
+            <div class="summary-card">
+                <div class="summary-label">Salary For Range</div>
+                <div class="summary-value mono-value">{{ '%.2f'|format(report_dataset.summary.salary_total) }}</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Salary Balance</div>
+                <div class="summary-value mono-value text-danger">{{ '%.2f'|format(report_dataset.summary.salary_balance) }}</div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="panel-card mb-4">
+            <div class="p-4">
+                <div class="section-head">
+                    <div>
+                        <h4>{{ report_dataset.title }}</h4>
+                        <p>Showing data between {{ report_from }} and {{ report_to }}.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table class="table table-hover align-middle">
+                        <thead>
+                            <tr>
+                                {% for header in report_dataset.headers %}
+                                <th>{{ header }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% if report_type == 'student' %}
+                                {% for row in report_dataset.rows %}
+                                <tr>
+                                    <td>{{ row.username }}</td>
+                                    <td>{{ row.full_name }}</td>
+                                    <td>{{ row.roll_number }}</td>
+                                    <td>{{ row.department }}</td>
+                                    <td class="mono-value">{{ row.present_days }}</td>
+                                    <td>{{ row.last_present_display }}</td>
+                                    <td class="mono-value">{{ '%.2f'|format(row.transport_fee) }}</td>
+                                    <td class="mono-value text-success">{{ '%.2f'|format(row.paid_fee) }}</td>
+                                    <td class="mono-value text-danger">{{ '%.2f'|format(row.balance_fee) }}</td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="{{ report_dataset.headers|length }}" class="text-center text-muted py-4">No student records found for this period.</td>
+                                </tr>
+                                {% endfor %}
+                            {% else %}
+                                {% for row in report_dataset.rows %}
+                                <tr>
+                                    <td>{{ row.name }}</td>
+                                    <td>{{ row.contact }}</td>
+                                    <td>{{ row.bus_number }}</td>
+                                    <td class="mono-value">{{ row.present_days }}</td>
+                                    <td class="mono-value">{{ '%.2f'|format(row.monthly_salary) }}</td>
+                                    <td class="mono-value">{{ '%.2f'|format(row.salary_total) }}</td>
+                                    <td class="mono-value text-success">{{ '%.2f'|format(row.salary_paid) }}</td>
+                                    <td class="mono-value text-danger">{{ '%.2f'|format(row.salary_balance) }}</td>
+                                    <td>{{ row.due_months_display }}</td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="{{ report_dataset.headers|length }}" class="text-center text-muted py-4">No driver records found for this period.</td>
+                                </tr>
+                                {% endfor %}
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-card">
+            <div class="p-4">
+                <div class="section-head">
+                    <div>
+                        <h4>Driver Salary Control</h4>
+                        <p>Maintain monthly salary and record salary payments used in staff reports.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table class="table table-hover align-middle">
+                        <thead>
+                            <tr>
+                                <th>Driver</th>
+                                <th>Bus</th>
+                                <th>Monthly Salary</th>
+                                <th>Total Paid</th>
+                                <th>Last Paid</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for driver in driver_salary_rows %}
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">{{ driver.name }}</div>
+                                    <div class="text-muted small">{{ driver.contact }}</div>
+                                </td>
+                                <td>{{ driver.bus_number }}</td>
+                                <td class="mono-value">{{ '%.2f'|format(driver.monthly_salary) }}</td>
+                                <td class="mono-value text-success">{{ '%.2f'|format(driver.total_paid_salary) }}</td>
+                                <td>{{ driver.last_paid_display }}</td>
+                                <td>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-outline-primary driver-salary-btn"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#driverSalaryModal"
+                                            data-driver-id="{{ driver.id }}"
+                                            data-driver-name="{{ driver.name }}"
+                                            data-monthly-salary="{{ driver.monthly_salary }}"
+                                        >
+                                            <i class="fas fa-pen me-1"></i> Set Salary
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="btn btn-sm btn-success driver-payment-btn"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#driverPaymentModal"
+                                            data-driver-id="{{ driver.id }}"
+                                            data-driver-name="{{ driver.name }}"
+                                        >
+                                            <i class="fas fa-money-check-dollar me-1"></i> Record Payment
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="6" class="text-center text-muted py-4">No drivers available for salary control.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="modal fade" id="broadcastModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content rounded-4 border-0">
+                <div class="modal-header">
+                    <h5 class="modal-title">Send System Broadcast</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="/admin/broadcast" method="POST">
+                    <div class="modal-body">
+                        <label class="form-label">Message</label>
+                        <textarea class="form-control" name="message" rows="4" placeholder="Bus 101 delayed by 10 minutes..." required></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Send Alert</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="studentProfileModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content rounded-4 border-0">
+                <div class="modal-header">
+                    <h5 class="modal-title">Update Student Profile</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="{{ url_for('admin_update_student') }}">
+                    <div class="modal-body">
+                        <input type="hidden" name="student_username" id="studentProfileUsername">
+                        <input type="hidden" name="return_url" value="{{ request.full_path }}">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label">Student Name</label>
+                                <input class="form-control" type="text" name="full_name" id="studentProfileName">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Roll Number</label>
+                                <input class="form-control" type="text" name="roll_number" id="studentProfileRoll">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Department</label>
+                                <input class="form-control" type="text" name="department" id="studentProfileDepartment" placeholder="CSE / ECE / MBA">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Contact Number</label>
+                                <input class="form-control" type="text" name="contact_number" id="studentProfileContact">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Student Stop</label>
+                                <input class="form-control" type="text" name="student_stop" id="studentProfileStop">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Transport Fee</label>
+                                <input class="form-control" type="number" min="0" step="0.01" name="transport_fee" id="studentProfileFee">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+                        <button type="submit" class="btn btn-primary">Save Student</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="studentPaymentModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content rounded-4 border-0">
+                <div class="modal-header">
+                    <h5 class="modal-title">Record Student Fee Payment</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="{{ url_for('admin_record_student_fee_payment') }}">
+                    <div class="modal-body">
+                        <input type="hidden" name="student_id" id="studentPaymentStudentId">
+                        <input type="hidden" name="return_url" value="{{ request.full_path }}">
+                        <div class="mb-3">
+                            <label class="form-label">Student</label>
+                            <input class="form-control" type="text" id="studentPaymentStudentName" readonly>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Balance Amount</label>
+                            <input class="form-control" type="text" id="studentPaymentBalance" readonly>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Paid Amount</label>
+                            <input class="form-control" type="number" min="0.01" step="0.01" name="amount_paid" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Payment Date</label>
+                            <input class="form-control" type="date" name="payment_date" value="{{ today_iso }}" required>
+                        </div>
+                        <div>
+                            <label class="form-label">Remarks</label>
+                            <input class="form-control" type="text" name="remarks" placeholder="Online / cash / term fee">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-success">Save Payment</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="driverSalaryModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content rounded-4 border-0">
+                <div class="modal-header">
+                    <h5 class="modal-title">Set Driver Monthly Salary</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="{{ url_for('admin_update_driver_salary') }}">
+                    <div class="modal-body">
+                        <input type="hidden" name="driver_id" id="driverSalaryDriverId">
+                        <input type="hidden" name="return_url" value="{{ request.full_path }}">
+                        <div class="mb-3">
+                            <label class="form-label">Driver</label>
+                            <input class="form-control" type="text" id="driverSalaryDriverName" readonly>
+                        </div>
+                        <div>
+                            <label class="form-label">Monthly Salary</label>
+                            <input class="form-control" type="number" min="0" step="0.01" name="monthly_salary" id="driverSalaryAmount" required>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Salary</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="driverPaymentModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content rounded-4 border-0">
+                <div class="modal-header">
+                    <h5 class="modal-title">Record Driver Salary Payment</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" action="{{ url_for('admin_record_driver_salary_payment') }}">
+                    <div class="modal-body">
+                        <input type="hidden" name="driver_id" id="driverPaymentDriverId">
+                        <input type="hidden" name="return_url" value="{{ request.full_path }}">
+                        <div class="mb-3">
+                            <label class="form-label">Driver</label>
+                            <input class="form-control" type="text" id="driverPaymentDriverName" readonly>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Salary Month</label>
+                            <input class="form-control" type="month" name="salary_month" id="driverPaymentSalaryMonth" value="{{ today_iso[:7] }}" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Paid Amount</label>
+                            <input class="form-control" type="number" min="0.01" step="0.01" name="amount_paid" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Paid Date</label>
+                            <input class="form-control" type="date" name="paid_date" value="{{ today_iso }}" required>
+                        </div>
+                        <div>
+                            <label class="form-label">Remarks</label>
+                            <input class="form-control" type="text" name="remarks" placeholder="Salary cleared / advance / part payment">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-success">Save Payment</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const analyticsData = {{ analytics | tojson }};
+        const usageChartCanvas = document.getElementById('usageChart');
+        if (usageChartCanvas) {
+            const ctx = usageChartCanvas.getContext('2d');
+            new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(analyticsData),
+                    datasets: [{
+                        data: Object.values(analyticsData),
+                        backgroundColor: ['#2563eb', '#ef4444', '#f59e0b', '#14b8a6']
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+
+        const mapEl = document.getElementById('map');
+        let map = null;
+        let busMarkers = {};
+        let hasFitFleet = false;
+
+        function formatFreshness(seconds) {
+            if (seconds === null || seconds === undefined) return 'Waiting';
+            if (seconds < 2) return 'Just now';
+            return `${seconds}s ago`;
+        }
+
+        function getMarkerIcon(bus) {
+            let colorClass = 'text-primary';
+            if (bus.status === 'maintenance') colorClass = 'text-secondary';
+            if (bus.is_stale) colorClass = 'text-warning';
+            return L.divIcon({
+                html: `<i class="fas fa-bus fa-2x ${colorClass}" style="text-shadow: 2px 2px 4px rgba(0,0,0,0.3);"></i>`,
+                className: 'custom-bus-icon',
+                iconSize: [30, 30]
+            });
+        }
+
+        function renderFleetCards(buses) {
+            const container = document.getElementById('fleetInfoList');
+            if (!container) return;
+
+            const activeLiveCount = buses.filter(bus => !bus.is_stale && bus.status === 'active').length;
+            const hasStaleFleet = buses.some(bus => bus.is_stale);
+            const systemStatusText = buses.length === 0 ? 'No Live GPS' : (hasStaleFleet ? 'Needs Attention' : 'Online');
+            const systemStatusTone = buses.length === 0 ? 'text-secondary' : (hasStaleFleet ? 'text-warning' : 'text-success');
+            const activeCountEl = document.getElementById('activeBusesCount');
+            const systemStatusEl = document.getElementById('systemStatusText');
+            if (activeCountEl) activeCountEl.innerText = activeLiveCount;
+            if (systemStatusEl) {
+                systemStatusEl.innerText = systemStatusText;
+                systemStatusEl.className = `fw-bold mb-0 ${systemStatusTone}`;
+            }
+
+            if (!buses.length) {
+                container.innerHTML = '<div class="text-muted">No active fleet locations available right now.</div>';
+                return;
+            }
+
+            container.innerHTML = buses.map(bus => {
+                const tone = bus.status === 'maintenance' ? 'maintenance' : (bus.is_stale ? 'waiting' : 'live');
+                return `
+                    <div class="fleet-card">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div class="title">${bus.bus_number}</div>
+                            <span class="fleet-status ${tone}">${bus.status_label}</span>
+                        </div>
+                        <div class="meta"><b>Route:</b> ${bus.route_name || 'Unassigned'}</div>
+                        <div class="meta"><b>Driver:</b> ${bus.driver_name || 'N/A'}</div>
+                        <div class="meta"><b>Nearest stop:</b> ${bus.nearest_stop_name || 'Locating...'}</div>
+                        <div class="meta"><b>ETA:</b> ${bus.eta_minutes ? `${bus.eta_minutes} min` : '--'}</div>
+                        <div class="meta"><b>Speed:</b> ${bus.speed || 0} km/h</div>
+                        <div class="meta"><b>Updated:</b> ${bus.updated_at_display || 'Waiting'} (${formatFreshness(bus.last_update_seconds)})</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updateBusLocations() {
+            if (!map) return;
+
+            fetch('/api/live_tracking')
+                .then(response => response.json())
+                .then(buses => {
+                    const visibleIds = [];
+                    const bounds = [];
+
+                    buses.forEach(bus => {
+                        if (bus.current_lat === null || bus.current_lng === null) return;
+
+                        visibleIds.push(bus.id);
+                        bounds.push([bus.current_lat, bus.current_lng]);
+
+                        const popupContent = `
+                            <div class="small">
+                                <div class="fw-bold text-primary mb-1">${bus.bus_number}</div>
+                                <div><b>Route:</b> ${bus.route_name || 'Unassigned'}</div>
+                                <div><b>Driver:</b> ${bus.driver_name || 'N/A'}</div>
+                                <div><b>Nearest stop:</b> ${bus.nearest_stop_name || 'Locating...'}</div>
+                                <div><b>Speed:</b> ${bus.speed || 0} km/h</div>
+                                <div><b>Updated:</b> ${bus.updated_at_display || 'Waiting'}</div>
+                            </div>
+                        `;
+
+                        if (busMarkers[bus.id]) {
+                            busMarkers[bus.id].setLatLng([bus.current_lat, bus.current_lng]);
+                            busMarkers[bus.id].setIcon(getMarkerIcon(bus));
+                            busMarkers[bus.id].setPopupContent(popupContent);
+                        } else {
+                            const marker = L.marker([bus.current_lat, bus.current_lng], { icon: getMarkerIcon(bus) }).addTo(map);
+                            marker.bindPopup(popupContent);
+                            busMarkers[bus.id] = marker;
+                        }
+                    });
+
+                    Object.keys(busMarkers).forEach(id => {
+                        if (!visibleIds.includes(Number(id))) {
+                            map.removeLayer(busMarkers[id]);
+                            delete busMarkers[id];
+                        }
+                    });
+
+                    renderFleetCards(buses);
+                    const refreshEl = document.getElementById('fleetRefreshStatus');
+                    if (refreshEl) {
+                        refreshEl.innerText = 'Live 3s';
+                        refreshEl.className = 'badge bg-success';
+                    }
+
+                    if (bounds.length && !hasFitFleet) {
+                        map.fitBounds(bounds, { padding: [40, 40] });
+                        hasFitFleet = true;
+                    }
+                })
+                .catch(() => {
+                    const refreshEl = document.getElementById('fleetRefreshStatus');
+                    if (refreshEl) {
+                        refreshEl.innerText = 'Feed Offline';
+                        refreshEl.className = 'badge bg-warning';
+                    }
+                });
+        }
+
+        if (mapEl) {
+            const defaultCenter = [17.3850, 78.4867];
+            map = L.map('map').setView(defaultCenter, 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+            updateBusLocations();
+            setInterval(updateBusLocations, 3000);
+        }
+
+        document.querySelectorAll('.student-edit-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                document.getElementById('studentProfileUsername').value = button.dataset.student || '';
+                document.getElementById('studentProfileName').value = button.dataset.fullName || '';
+                document.getElementById('studentProfileRoll').value = button.dataset.rollNumber || '';
+                document.getElementById('studentProfileDepartment').value = button.dataset.department || '';
+                document.getElementById('studentProfileContact').value = button.dataset.contactNumber || '';
+                document.getElementById('studentProfileStop').value = button.dataset.studentStop || '';
+                document.getElementById('studentProfileFee').value = button.dataset.transportFee || '0.00';
+            });
+        });
+
+        document.querySelectorAll('.student-payment-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                document.getElementById('studentPaymentStudentId').value = button.dataset.student || '';
+                document.getElementById('studentPaymentStudentName').value = button.dataset.name || '';
+                document.getElementById('studentPaymentBalance').value = button.dataset.balance || '0.00';
+            });
+        });
+
+        document.querySelectorAll('.driver-salary-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                document.getElementById('driverSalaryDriverId').value = button.dataset.driverId || '';
+                document.getElementById('driverSalaryDriverName').value = button.dataset.driverName || '';
+                document.getElementById('driverSalaryAmount').value = button.dataset.monthlySalary || '0.00';
+            });
+        });
+
+        document.querySelectorAll('.driver-payment-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                document.getElementById('driverPaymentDriverId').value = button.dataset.driverId || '';
+                document.getElementById('driverPaymentDriverName').value = button.dataset.driverName || '';
+            });
+        });
+
+        const reportTypeSelect = document.getElementById('reportTypeSelect');
+        const reportDepartmentWrap = document.getElementById('reportDepartmentWrap');
+        function syncReportDepartmentVisibility() {
+            if (!reportTypeSelect || !reportDepartmentWrap) return;
+            reportDepartmentWrap.style.display = reportTypeSelect.value === 'student' ? 'block' : 'none';
+        }
+        if (reportTypeSelect) {
+            syncReportDepartmentVisibility();
+            reportTypeSelect.addEventListener('change', syncReportDepartmentVisibility);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Real-Time Bus Tracker</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body { background-color: #f8f9fa; }
+        #map { height: 90vh; width: 100%; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .info-panel { position: absolute; top: 20px; right: 20px; z-index: 1000; width: 300px; }
+        
+        /* 3D Bus Icon Styling */
+        .custom-bus-icon { background: transparent; border: none; }
+        .bus-3d-img {
+            width: 50px; height: 50px;
+            transition: transform 0.5s linear; /* Smooth rotation for live direction */
+            filter: drop-shadow(5px 5px 5px rgba(0,0,0,0.4)); /* 3D Shadow effect */
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid py-3">
+        <div class="row">
+            <div class="col-12 position-relative">
+                <div id="map"></div>
+                
+                <!-- Floating Info Panel -->
+                <div class="card info-panel bg-white shadow-sm">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                        <span><i class="fas fa-satellite-dish me-2"></i>Live Fleet</span>
+                        <span class="badge bg-success" id="activeCount">0 Active</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <ul class="list-group list-group-flush" id="busList" style="max-height: 40vh; overflow-y: auto;">
+                            <li class="list-group-item text-muted text-center py-3">
+                                <div class="spinner-border spinner-border-sm text-primary" role="status"></div> 
+                                Connecting to satellites...
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="card-footer text-muted small text-center">
+                        Last Update: <span id="lastUpdate">--:--:--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Map Initialization
+        var map = L.map('map').setView([17.3850, 78.4867], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        var busMarkers = {};
+        var followingBusId = null;
+
+        function toggleFocus(id) {
+            if (followingBusId === id) {
+                followingBusId = null;
+            } else {
+                followingBusId = id;
+                if (busMarkers[id]) {
+                    map.setView(busMarkers[id].getLatLng(), 17);
+                }
+            }
+            updateLocations();
+        }
+
+        // Helper: Calculate Bearing (Direction) between two points
+        function getBearing(lat1, lng1, lat2, lng2) {
+            const toRad = (deg) => deg * Math.PI / 180;
+            const toDeg = (rad) => rad * 180 / Math.PI;
+            
+            const φ1 = toRad(lat1);
+            const φ2 = toRad(lat2);
+            const Δλ = toRad(lng2 - lng1);
+            
+            const y = Math.sin(Δλ) * Math.cos(φ2);
+            const x = Math.cos(φ1) * Math.sin(φ2) -
+                      Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+            const θ = Math.atan2(y, x);
+            return (toDeg(θ) + 360) % 360;
+        }
+
+        // 3D Bus Icon Definition
+        function createBusIcon(rotation = 0) {
+            return L.divIcon({
+                className: 'custom-bus-icon',
+                html: `<img src="https://cdn-icons-png.flaticon.com/512/5115/5115283.png" class="bus-3d-img" style="transform: rotate(${rotation}deg);">`, 
+                iconSize: [50, 50],
+                iconAnchor: [25, 25],
+                popupAnchor: [0, -25]
+            });
+        }
+
+        function updateLocations() {
+            fetch('/api/live_tracking')
+                .then(res => res.json())
+                .then(data => {
+                    const list = document.getElementById('busList');
+                    const activeIds = data.map(b => b.id);
+                    
+                    // Update UI Counters
+                    document.getElementById('activeCount').innerText = `${data.length} Active`;
+                    document.getElementById('lastUpdate').innerText = new Date().toLocaleTimeString();
+                    
+                    // Clear list if empty or rebuild
+                    if (data.length === 0) {
+                        list.innerHTML = '<li class="list-group-item text-center text-muted">No active buses found.</li>';
+                    } else {
+                        list.innerHTML = ''; // Rebuild list for simplicity
+                        data.forEach(bus => {
+                            if (followingBusId === bus.id) {
+                                map.panTo([bus.current_lat, bus.current_lng]);
+                            }
+
+                            // Add to Sidebar List
+                            const isFocused = followingBusId === bus.id;
+                            const li = document.createElement('li');
+                            li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                            li.innerHTML = `
+                                <div>
+                                    <strong>${bus.bus_number}</strong>
+                                    <div class="small text-muted"><i class="fas fa-tachometer-alt"></i> ${bus.speed || 0} km/h</div>
+                                </div>
+                                <button class="btn btn-sm ${isFocused ? 'btn-danger' : 'btn-outline-primary'}" 
+                                        onclick="toggleFocus(${bus.id})" title="${isFocused ? 'Stop Following' : 'Focus & Follow'}">
+                                    <i class="fas ${isFocused ? 'fa-video' : 'fa-crosshairs'}"></i>
+                                </button>
+                            `;
+                            list.appendChild(li);
+
+                            // Popup Content
+                            const popupContent = `
+                                <div class="text-center">
+                                    <h6 class="mb-1 fw-bold text-primary">${bus.bus_number}</h6>
+                                    <span class="badge bg-${bus.status === 'active' ? 'success' : 'warning'} mb-2">${bus.status.toUpperCase()}</span>
+                                    <hr class="my-1">
+                                    <div class="text-start small">
+                                        <div><i class="fas fa-user-tie me-1"></i> <b>Driver:</b> ${bus.driver_name || 'Unassigned'}</div>
+                                        <div><i class="fas fa-phone me-1"></i> <b>Contact:</b> ${bus.driver_contact || 'N/A'}</div>
+                                        <div><i class="fas fa-tachometer-alt me-1"></i> <b>Speed:</b> ${bus.speed || 0} km/h</div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <button class="btn btn-sm ${followingBusId === bus.id ? 'btn-danger' : 'btn-primary'} w-100" onclick="toggleFocus(${bus.id})">
+                                            <i class="fas ${followingBusId === bus.id ? 'fa-video' : 'fa-crosshairs'}"></i> 
+                                            ${followingBusId === bus.id ? 'Stop Following' : 'Focus Bus'}
+                                        </button>
+                                    </div>
+                                </div>
+                            `;
+
+                            let bearing = 0;
+                            if (busMarkers[bus.id]) {
+                                // Calculate new bearing based on movement
+                                const oldLatLng = busMarkers[bus.id].getLatLng();
+                                if (oldLatLng.lat !== bus.current_lat || oldLatLng.lng !== bus.current_lng) {
+                                    bearing = getBearing(oldLatLng.lat, oldLatLng.lng, bus.current_lat, bus.current_lng);
+                                } else {
+                                    // Maintain previous bearing if stationary
+                                    bearing = busMarkers[bus.id].options.rotationAngle || 0;
+                                }
+
+                                busMarkers[bus.id].setLatLng([bus.current_lat, bus.current_lng]);
+                                busMarkers[bus.id].setPopupContent(popupContent);
+                                
+                                // Rotate the icon
+                                const iconImg = busMarkers[bus.id].getElement()?.querySelector('.bus-3d-img');
+                                if(iconImg) iconImg.style.transform = `rotate(${bearing}deg)`;
+                                busMarkers[bus.id].options.rotationAngle = bearing;
+                            } else {
+                                var marker = L.marker([bus.current_lat, bus.current_lng], {icon: createBusIcon(0)}).addTo(map);
+                                marker.bindPopup(popupContent);
+                                marker.options.rotationAngle = 0;
+                                busMarkers[bus.id] = marker;
+                            }
+                        });
+                    }
+
+                    // Remove markers for buses that went offline
+                    for (let id in busMarkers) {
+                        if (!activeIds.includes(parseInt(id))) {
+                            map.removeLayer(busMarkers[id]);
+                            delete busMarkers[id];
+                        }
+                    }
+                });
+        }
+
+        // Poll every 2 seconds for instant updates
+        setInterval(updateLocations, 2000);
+        updateLocations();
+    </script>
+</body>
+</html>
