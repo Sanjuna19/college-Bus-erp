@@ -2,7 +2,7 @@ from flask import Flask, Response, render_template, request, jsonify, redirect, 
 import psycopg2
 from psycopg2 import errors
 from psycopg2.extras import RealDictCursor
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import io
 import os
@@ -158,6 +158,10 @@ def make_json_safe(value):
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     if isinstance(value, datetime):
         return value.strftime('%Y-%m-%d %H:%M:%S')
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.strftime('%H:%M:%S')
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, list):
