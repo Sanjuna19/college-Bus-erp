@@ -250,7 +250,7 @@ def get_student_block_message():
 
 def is_student_blocked(cur, student_id):
     cur.execute(
-        "SELECT COALESCE(is_blocked, 0) AS is_blocked FROM users WHERE username = %s AND role = 'student'",
+        "SELECT COALESCE(is_blocked, FALSE) AS is_blocked FROM users WHERE username = %s AND role = 'student'",
         (student_id,)
     )
     row = cur.fetchone()
@@ -292,8 +292,8 @@ def fetch_student_metrics(cur):
         SELECT
             COUNT(*) AS total_students,
             COALESCE(SUM(CASE WHEN username IS NOT NULL AND username <> '' THEN 1 ELSE 0 END), 0) AS ids_created,
-            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 0 THEN 1 ELSE 0 END), 0) AS active_ids,
-            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 1 THEN 1 ELSE 0 END), 0) AS blocked_ids,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, FALSE) = FALSE THEN 1 ELSE 0 END), 0) AS active_ids,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, FALSE) = TRUE THEN 1 ELSE 0 END), 0) AS blocked_ids,
             COUNT(DISTINCT COALESCE(NULLIF(department, ''), 'Unassigned')) AS departments_count
         FROM users
         WHERE role = 'student'
@@ -314,8 +314,8 @@ def fetch_department_summaries(cur):
         SELECT
             COALESCE(NULLIF(department, ''), 'Unassigned') AS department,
             COUNT(*) AS total_students,
-            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 1 THEN 1 ELSE 0 END), 0) AS blocked_students,
-            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 0 THEN 1 ELSE 0 END), 0) AS active_students
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, FALSE) = TRUE THEN 1 ELSE 0 END), 0) AS blocked_students,
+            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, FALSE) = FALSE THEN 1 ELSE 0 END), 0) AS active_students
         FROM users
         WHERE role = 'student'
         GROUP BY department
@@ -349,7 +349,7 @@ def fetch_student_directory(cur, department_filter='', search_term=''):
             COALESCE(NULLIF(u.contact_number, ''), '--') AS contact_number,
             COALESCE(NULLIF(u.student_stop, ''), '--') AS student_stop,
             COALESCE(u.transport_fee, 0.00) AS transport_fee,
-            COALESCE(u.is_blocked, 0) AS is_blocked,
+            COALESCE(u.is_blocked, FALSE) AS is_blocked,
             COALESCE(att.present_days_total, 0) AS present_days_total,
             att.last_present_at,
             COALESCE(pay.total_paid, 0.00) AS paid_fee,
@@ -1460,7 +1460,7 @@ def admin_update_student():
 @app.route('/admin/student/toggle_block/<student_username>', methods=['POST'])
 def admin_toggle_student_block(student_username):
     action = (request.form.get('action') or '').strip().lower()
-    is_blocked = 1 if action == 'block' else 0
+    is_blocked = action == 'block'
 
     conn = get_db_connection()
     cur = conn.cursor()
