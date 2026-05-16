@@ -10,14 +10,15 @@ import math
 import textwrap
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key_here'  # Required for session management
+app.secret_key = os.getenv('SECRET_KEY', 'your_secret_key_here')  # Required for session management
 
 # MySQL Configuration
 db_config = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '',
-    'database': 'college_bus_db',
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'database': os.getenv('DB_NAME', 'college_bus_db'),
+    'port': int(os.getenv('DB_PORT', '3306')),
     'cursorclass': pymysql.cursors.DictCursor # This lets us access columns by name
 }
 
