@@ -118,7 +118,6 @@ def ensure_runtime_schema(conn):
 
 # Helper function to get a connection
 def get_db_connection():
-        import os
     raw_url = os.environ.get("DATABASE_URL", "")
     # This masks your password but prints the username, host, and port to Vercel logs
     print("CURRENT CONNECTING URL:", raw_url.split(":")[0] + "://***@" + raw_url.split("@")[-1])
